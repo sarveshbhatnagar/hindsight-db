@@ -9,6 +9,7 @@ import type { DatabaseOptions } from "./types.js";
 export * from "./types.js";
 export { parseDuration, toMillis, windowAround } from "./time.js";
 export { cosine } from "./vector.js";
+export { SCHEMA_VERSION, SchemaVersionError } from "./storage/migrations.js";
 export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
 
 /**
@@ -35,6 +36,11 @@ export class HindsightDB {
     this.decisions = new DecisionStore(this.conn);
     this.outcomes = new OutcomeStore(this.conn);
     this.history = new HistoryStore(this.conn, this.events, this.timeline, this.decisions, this.outcomes);
+  }
+
+  /** Schema version of the open file (equals SCHEMA_VERSION after open). */
+  get schemaVersion(): number {
+    return this.conn.db.pragma("user_version", { simple: true }) as number;
   }
 
   /** Run several writes atomically. */

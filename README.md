@@ -158,6 +158,7 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 ## Implementation notes
 
 - **Storage**: a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events). All stores share one connection.
+- **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one.
 - **Vector search**: embeddings are stored as Float32 blobs (native byte order) with a precomputed L2 norm; non-finite components are rejected at insert and query time. `similar()` narrows candidates with SQL filters, then scores cosine similarity in-process with a bounded top-k. This is exact, not approximate — fine up to roughly 10⁵ events per query; swap in an ANN index behind the same interface when that stops being true.
 - **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout so a networked backend (e.g. Postgres + pgvector) can be dropped in without changing callers.
 - **Pagination**: `events.list` and `timeline.range` use opaque keyset cursors on `(timestamp, id)`.
@@ -201,7 +202,8 @@ src/
   types.ts            input/output types
   time.ts             duration + timestamp parsing
   vector.ts           embedding encoding, cosine
-  storage/sqlite.ts   schema + connection helpers
+  storage/sqlite.ts   connection + SQL helpers
+  storage/migrations.ts  versioned schema (append-only)
   stores/             events, timeline, decisions, outcomes, history
 tests/                vitest, one file per store + end-to-end flow
 ```
