@@ -147,6 +147,9 @@ export class EventStore {
       ),
       get: this.conn.db.prepare(`${SELECT} WHERE e.id = ?`),
       delete: this.conn.db.prepare(`DELETE FROM events WHERE id = ?`),
+      exists: this.conn.db.prepare(`SELECT 1 FROM events WHERE id = ?`),
+      maxPosition: this.conn.db.prepare(`SELECT coalesce(max(position), -1) AS p FROM event_entities WHERE event_id = ?`),
+      deleteEntity: this.conn.db.prepare(`DELETE FROM event_entities WHERE event_id = ? AND entity_id = ?`),
     };
   }
 
@@ -225,6 +228,53 @@ export class EventStore {
 
   async delete(id: string): Promise<boolean> {
     return this.prepared.delete.run(id).changes > 0;
+  }
+
+  /**
+   * Label an existing event with more entities. Already-present entities are
+   * ignored; new ones are appended in the given order. Returns the updated event.
+   */
+  async addEntities(id: string, entities: string[]): Promise<Event> {
+    const cleaned = [...new Set(entities.map((e) => assertEntity("entities[]", e)))];
+    return this.conn.transaction(() => {
+      if (!this.prepared.exists.get(id)) throw new Error(`Event not found: ${id}`);
+      let position = (this.prepared.maxPosition.get(id) as { p: number }).p;
+      for (const entity of cleaned) {
+        const r = this.prepared.insertEntity.run(id, entity, position + 1);
+        if (r.changes > 0) position++;
+      }
+      return rowToEvent(this.prepared.get.get(id) as EventRow, false);
+    });
+  }
+
+  /** Remove entities from an event. Entities not present are ignored. Returns the updated event. */
+  async removeEntities(id: string, entities: string[]): Promise<Event> {
+    return this.conn.transaction(() => {
+      if (!this.prepared.exists.get(id)) throw new Error(`Event not found: ${id}`);
+      for (const entity of entities) this.prepared.deleteEntity.run(id, entity);
+      return rowToEvent(this.prepared.get.get(id) as EventRow, false);
+    });
+  }
+
+  /**
+   * Rename an entity everywhere it appears on events (e.g. to merge two
+   * spellings of a tag). Timeline data is not touched. Returns the number of
+   * events affected.
+   */
+  async renameEntity(from: string, to: string): Promise<number> {
+    assertEntity("from", from);
+    assertEntity("to", to);
+    if (from === to) return 0;
+    return this.conn.transaction(() => {
+      // Events that already carry `to` would violate the PK on update; drop their `from` row instead.
+      this.conn.db
+        .prepare(
+          `DELETE FROM event_entities WHERE entity_id = ?
+           AND event_id IN (SELECT event_id FROM event_entities WHERE entity_id = ?)`,
+        )
+        .run(from, to);
+      return this.conn.db.prepare(`UPDATE event_entities SET entity_id = ? WHERE entity_id = ?`).run(to, from).changes;
+    });
   }
 
   /** Filtered, paginated listing ordered by (timestamp, id). */
@@ -318,8 +368,11 @@ export class EventStore {
     const minScore = query.minScore ?? -Infinity;
 
     // Scan only what scoring needs; everything else is fetched for the few hits afterwards.
+    // When other filters are present, `+e.dim` stops the planner from choosing the
+    // dim index (which would scan every row of that dimension) over the selective one.
+    const dimTerm = where === "1" ? "e.dim = ?" : "+e.dim = ?";
     const rows = this.conn.db
-      .prepare(`SELECT e.id, e.embedding, e.norm FROM events e WHERE e.embedding IS NOT NULL AND e.dim = ? AND ${where}`)
+      .prepare(`SELECT e.id, e.embedding, e.norm FROM events e WHERE e.embedding IS NOT NULL AND ${dimTerm} AND ${where}`)
       .iterate(vector.length, ...params) as IterableIterator<Pick<EventRow, "id" | "embedding" | "norm">>;
 
     // Bounded top-k: keep a descending-sorted array of at most `limit` entries.

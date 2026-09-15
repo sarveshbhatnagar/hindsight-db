@@ -88,6 +88,8 @@ All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s 
 | `list({ filters?, limit?, cursor?, order? })` | Filtered, cursor-paginated listing. |
 | `similar({ event, limit?, minScore?, filters? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. |
 | `delete(id)` | Delete an event and its decisions/outcomes. |
+| `addEntities(id, entities)` / `removeEntities(id, entities)` | Re-label an existing event. Adds append in order and ignore duplicates; removes ignore absent ones. |
+| `renameEntity(from, to)` | Rename a label across all events (merges with events that already carry `to`). |
 | `entities({ type?, from?, to?, prefix?, limit? })` | Catalog: entities in use with counts and event-time span, most frequent first. |
 | `types()` | Catalog: event types with counts and span. |
 
@@ -177,7 +179,17 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 | `timeline.range` paging | ~1.5–3 ms per 1000 points |
 | Ingest | events ~14k/s, timeline ~65k/s (2M rows), decisions ~70k/s |
 
-`similar()` scans only `(id, embedding, norm)` and hydrates the top-k afterwards; cost is roughly 1 µs/row plus ~4 ns/dim/row. For a much larger event table, an ANN index is the next step.
+`similar()` scans only `(id, embedding, norm)` and hydrates the top-k afterwards; cost is roughly 1 µs/row plus ~4 ns/dim/row **over the candidates that survive the SQL filters**, so selective filters are the main lever:
+
+| `similar()` on 100k events, 128-dim | Candidates | Time |
+| --- | --- | --- |
+| no filter | 100k | ~80 ms |
+| entity carried by 10% of events | 10k | ~14 ms |
+| entity carried by 1% | 1k | ~1.4 ms |
+| entity carried by 0.1% | 100 | ~0.3 ms |
+| 1% event-time window | 1k | ~1 ms |
+
+A filter on an entity that nearly every event carries (e.g. a catch-all tag) is *slower* than no filter, since it adds a join without pruning anything. Use `events.entities()` to check a label's count before relying on it. For a much larger event table with unfiltered queries, an ANN index is the next step.
 
 Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuilds timeline indexes (≈4.6× faster ingest of 2M rows); a `timeline(entity, timestamp)` index or per-namespace range queries for history windows (≈2× on `getMany` with many namespaces); batching `events.list`'s entity lookup (≈20%/page); batch-resolving outcome anchors in `outcomes.insertMany` (≈1.5×). Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
 

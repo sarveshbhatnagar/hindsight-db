@@ -119,3 +119,48 @@ describe("timeline.entities / timeline.namespaces", () => {
     fresh.close();
   });
 });
+
+describe("events.addEntities / removeEntities / renameEntity", () => {
+  it("appends new entities in order, ignores duplicates, and is filterable immediately", async () => {
+    const ev = await db.events.addEntities("e1", ["theme:ai", "AAPL", "NVDA", "theme:ai"]);
+    expect(ev.entities).toEqual(["AAPL", "sector:tech", "theme:ai", "NVDA"]);
+    expect((await db.events.get("e1"))!.entities).toEqual(["AAPL", "sector:tech", "theme:ai", "NVDA"]);
+    expect((await db.events.list({ filters: { entitiesAll: ["theme:ai", "AAPL"] } })).items.map((e) => e.id)).toEqual(["e1"]);
+    // Appending again keeps the order stable.
+    const again = await db.events.addEntities("e1", ["XOM"]);
+    expect(again.entities).toEqual(["AAPL", "sector:tech", "theme:ai", "NVDA", "XOM"]);
+  });
+
+  it("labels an event that had no entities", async () => {
+    const ev = await db.events.addEntities("e4", ["macro:fomc"]);
+    expect(ev.entities).toEqual(["macro:fomc"]);
+    expect((await db.events.entities({ prefix: "macro:" })).map((e) => e.entity)).toEqual(["macro:fomc"]);
+  });
+
+  it("removes entities and ignores ones not present", async () => {
+    const ev = await db.events.removeEntities("e2", ["sector:tech", "nope"]);
+    expect(ev.entities).toEqual(["NVDA", "theme:ai"]);
+    expect((await db.events.list({ filters: { entities: "sector:tech" } })).items.map((e) => e.id)).toEqual(["e1"]);
+    // Removing then re-adding appends at the end.
+    expect((await db.events.addEntities("e2", ["sector:tech"])).entities).toEqual(["NVDA", "theme:ai", "sector:tech"]);
+  });
+
+  it("validates input and unknown events", async () => {
+    await expect(db.events.addEntities("nope", ["A"])).rejects.toThrow(/not found/);
+    await expect(db.events.removeEntities("nope", ["A"])).rejects.toThrow(/not found/);
+    await expect(db.events.addEntities("e1", [""])).rejects.toThrow(/non-empty/);
+    await expect(db.events.addEntities("e1", ["a\x1fb"])).rejects.toThrow(/U\+001F/);
+    expect((await db.events.addEntities("e1", [])).entities).toEqual(["AAPL", "sector:tech"]);
+  });
+
+  it("renames an entity across events, merging with events that already have the target", async () => {
+    await db.events.addEntities("e3", ["sector:tech"]); // e3 now has AAPL, NVDA, sector:tech
+    await db.events.addEntities("e5", ["tech"]); // a variant spelling on an energy event
+    expect(await db.events.renameEntity("sector:tech", "tech")).toBe(3); // e1, e2, e3
+    expect((await db.events.entities({ prefix: "sector:" })).map((e) => e.entity)).toEqual(["sector:energy"]);
+    expect((await db.events.entities()).find((e) => e.entity === "tech")?.count).toBe(4); // e1,e2,e3,e5
+    expect((await db.events.get("e5"))!.entities).toEqual(["XOM", "sector:energy", "tech"]);
+    expect(await db.events.renameEntity("ghost", "x")).toBe(0);
+    expect(await db.events.renameEntity("tech", "tech")).toBe(0);
+  });
+});
