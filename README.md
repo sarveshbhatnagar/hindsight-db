@@ -1,6 +1,6 @@
-# action-graph
+# hindsight-db
 
-Embedded database for storing and retrieving multiple related views of historical data:
+Embedded database for looking back at historical events the way a decision-maker saw them at the time — and what happened next. It stores multiple related views of historical data:
 
 ```
 Event
@@ -25,7 +25,7 @@ Requires Node 18+.
 ## Quick start
 
 ```ts
-import { openDatabase } from "action-graph";
+import { openDatabase } from "hindsight-db";
 
 const db = openDatabase({ path: "history.db" }); // omit path for in-memory
 
@@ -197,7 +197,7 @@ Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuil
 
 ```
 src/
-  index.ts            openDatabase(), ActionGraph, public exports
+  index.ts            openDatabase(), HindsightDB, public exports
   types.ts            input/output types
   time.ts             duration + timestamp parsing
   vector.ts           embedding encoding, cosine

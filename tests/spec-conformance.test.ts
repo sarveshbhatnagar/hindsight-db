@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ActionGraph, openDatabase, parseDuration, windowAround } from "../src/index.js";
+import { HindsightDB, openDatabase, parseDuration, windowAround } from "../src/index.js";
 import type { Event, History, TimelinePoint } from "../src/index.js";
 
 /**
@@ -33,7 +33,7 @@ interface Scenario {
 }
 
 /** Seed the AAPL earnings scenario. Returns the ids the tests refer to. */
-async function seedAapl(db: ActionGraph): Promise<Scenario> {
+async function seedAapl(db: HindsightDB): Promise<Scenario> {
   const event = await db.events.insert({
     id: "aapl-q1-2024",
     timestamp: E,
@@ -79,7 +79,7 @@ async function seedAapl(db: ActionGraph): Promise<Scenario> {
 }
 
 /** Attach outcomes "later once they become known". */
-async function attachOutcomes(db: ActionGraph, s: Scenario) {
+async function attachOutcomes(db: HindsightDB, s: Scenario) {
   await db.outcomes.insertMany([
     { eventId: s.event.id, decisionId: s.decisionId, horizon: "1d", result: { return: 0.031 } },
     { eventId: s.event.id, decisionId: s.decisionId, horizon: "5d", result: { return: 0.052 } },
@@ -91,7 +91,7 @@ const flatten = (streams: Record<string, TimelinePoint[]>): TimelinePoint[] => O
 const ks = (pts: TimelinePoint[] | undefined) => (pts ?? []).map((p) => (p.data as { k: number }).k);
 const headlines = (pts: TimelinePoint[] | undefined) => (pts ?? []).map((p) => (p.data as { headline: string }).headline);
 
-let db: ActionGraph;
+let db: HindsightDB;
 beforeEach(() => {
   db = openDatabase();
 });

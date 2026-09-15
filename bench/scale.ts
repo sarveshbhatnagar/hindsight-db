@@ -1,15 +1,16 @@
 /**
- * Scale / performance benchmark for action-graph.
+ * Scale / performance benchmark for hindsight-db.
  *
  * Run:  npm run build && node bench/scale.ts
  * (Node >= 22.18 strips types natively; older Node: `node --experimental-strip-types`.)
  *
- * Writes an on-disk database under BENCH_DIR (default: this session's scratchpad),
+ * Writes an on-disk database under BENCH_DIR (default: a temp directory),
  * deletes it when done. Scale knobs are env-overridable so the run stays under a
  * few minutes; defaults match the spec (100k events, 2M timeline points, ...).
  */
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { openDatabase } from "../dist/index.js";
@@ -19,10 +20,8 @@ import { cosine, decodeEmbedding, l2norm } from "../dist/vector.js";
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BENCH_DIR =
-  process.env.BENCH_DIR ??
-  "/private/tmp/claude-501/-Users-sarveshbhatnagar-Development-action-graph/84752eaf-904f-4bae-8745-cec8f13de897/scratchpad";
-const DB_PATH = join(BENCH_DIR, "action-graph-scale.db");
+const BENCH_DIR = process.env.BENCH_DIR ?? join(tmpdir(), "hindsight-db-bench");
+const DB_PATH = join(BENCH_DIR, "hindsight-db-scale.db");
 
 const N_EVENTS = num("N_EVENTS", 100_000);
 const DIM = 128;
@@ -121,7 +120,7 @@ async function main(): Promise<void> {
   mkdirSync(BENCH_DIR, { recursive: true });
   for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(DB_PATH + suffix, { force: true });
 
-  console.log(`action-graph scale bench  node ${process.version}  ${new Date().toISOString()}`);
+  console.log(`hindsight-db scale bench  node ${process.version}  ${new Date().toISOString()}`);
   console.log(
     `events=${N_EVENTS} dim=${DIM}  big=${N_BIG}@${BIG_DIM}  timeline=${N_ENTITIES}x${NAMESPACES.length}x${N_DAYS}=${N_ENTITIES * NAMESPACES.length * N_DAYS}  runs=${RUNS}\n`,
   );
@@ -752,7 +751,7 @@ async function ingestPragmaExperiment(): Promise<void> {
     ["synchronous=NORMAL only", (raw) => raw.pragma("synchronous = NORMAL")],
   ];
   for (const [name, apply] of configs) {
-    const path = join(BENCH_DIR, "action-graph-pragma.db");
+    const path = join(BENCH_DIR, "hindsight-db-pragma.db");
     for (const suffix of ["", "-wal", "-shm"]) rmSync(path + suffix, { force: true });
     const db = openDatabase({ path });
     apply((db as any).conn.db);

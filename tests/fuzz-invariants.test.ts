@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest";
 import {
   openDatabase,
-  type ActionGraph,
+  type HindsightDB,
   type Decision,
   type DurationInput,
   type Event,
@@ -142,7 +142,7 @@ function describeQuery(q: unknown): string {
 
 interface World {
   seed: number;
-  db: ActionGraph;
+  db: HindsightDB;
   dim: number;
   events: Event[]; // without embeddings
   embeddings: Map<string, Float32Array>; // events that have one

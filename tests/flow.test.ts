@@ -15,7 +15,7 @@ const T = (day: number) => Date.UTC(2024, 0, 1) + day * DAY;
 let dir: string;
 let path: string;
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), "action-graph-"));
+  dir = mkdtempSync(join(tmpdir(), "hindsight-db-"));
   path = join(dir, "history.db");
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

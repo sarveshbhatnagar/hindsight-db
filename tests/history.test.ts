@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ActionGraph, openDatabase } from "../src/index.js";
+import { HindsightDB, openDatabase } from "../src/index.js";
 
 const T0 = Date.UTC(2024, 0, 10); // event time
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
-let db: ActionGraph;
+let db: HindsightDB;
 beforeEach(async () => {
   db = openDatabase();
   // Event at day 0 (T0), observed 2h later.

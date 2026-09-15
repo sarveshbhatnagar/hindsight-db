@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ActionGraph, openDatabase, parseDuration, toMillis, type EventFilters } from "../src/index.js";
+import { HindsightDB, openDatabase, parseDuration, toMillis, type EventFilters } from "../src/index.js";
 
 /**
  * Adversarial, boundary and lifecycle tests.
@@ -19,7 +19,7 @@ const T0 = Date.UTC(2024, 0, 10);
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
-let db: ActionGraph;
+let db: HindsightDB;
 beforeEach(() => {
   db = openDatabase();
 });
@@ -659,7 +659,7 @@ describe("lifecycle: on-disk databases", () => {
   let dir: string;
   let path: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "action-graph-edge-"));
+    dir = mkdtempSync(join(tmpdir(), "hindsight-db-edge-"));
     path = join(dir, "edge.db");
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));

@@ -1,7 +1,7 @@
 {
-  "name": "action-graph",
+  "name": "hindsight-db",
   "version": "0.1.0",
-  "description": "Embedded database for storing and retrieving related views of historical events: events, timelines, decisions and outcomes.",
+  "description": "Embedded hindsight database: historical events with point-in-time context, the decisions made, and the outcomes observed — without leaking the future into the past.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

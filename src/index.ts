@@ -12,7 +12,7 @@ export { cosine } from "./vector.js";
 export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
 
 /**
- * The action-graph database handle.
+ * The hindsight-db database handle.
  *
  * ```ts
  * const db = openDatabase({ path: "history.db" });
@@ -20,7 +20,7 @@ export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistorySto
  * const history = await db.history.getMany({ eventIds: candidates.map(c => c.id), before: "14d", after: "5d" });
  * ```
  */
-export class ActionGraph {
+export class HindsightDB {
   readonly events: EventStore;
   readonly timeline: TimelineStore;
   readonly decisions: DecisionStore;
@@ -47,6 +47,6 @@ export class ActionGraph {
   }
 }
 
-export function openDatabase(options: DatabaseOptions = {}): ActionGraph {
-  return new ActionGraph(options);
+export function openDatabase(options: DatabaseOptions = {}): HindsightDB {
+  return new HindsightDB(options);
 }
