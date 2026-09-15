@@ -1,0 +1,36 @@
+{
+  "name": "action-graph",
+  "version": "0.1.0",
+  "description": "Embedded database for storing and retrieving related views of historical events: events, timelines, decisions and outcomes.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
