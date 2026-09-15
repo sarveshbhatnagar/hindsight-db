@@ -88,8 +88,12 @@ All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s 
 | `list({ filters?, limit?, cursor?, order? })` | Filtered, cursor-paginated listing. |
 | `similar({ event, limit?, minScore?, filters? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. |
 | `delete(id)` | Delete an event and its decisions/outcomes. |
+| `entities({ type?, from?, to?, prefix?, limit? })` | Catalog: entities in use with counts and event-time span, most frequent first. |
+| `types()` | Catalog: event types with counts and span. |
 
-Filters: `type`, `entities` (any-of), `from`/`to` (event time), `asOf` (observation time — only events known at that point), `metadata` (top-level equality), `excludeIds`.
+Filters: `type`, `entities` (any-of), `entitiesAll` (all-of), `from`/`to` (event time), `asOf` (observation time — only events known at that point), `metadata` (top-level equality), `excludeIds`.
+
+Events can carry any number of entities. Entities are the indexed, filterable labels — tickers, people, and also tags such as `sector:tech` or `theme:ai`; a prefix convention keeps them discoverable via `entities({ prefix: "sector:" })`. `metadata` is for scalar attributes you filter by equality, not for set membership.
 
 ### `db.timeline`
 
@@ -98,6 +102,8 @@ Filters: `type`, `entities` (any-of), `from`/`to` (event time), `asOf` (observat
 | `insert(point)` / `insertMany(points)` | Store timestamped data under an `entity` and `namespace` (`market`, `news`, `macro`, `signals`, `positions`, or anything custom). |
 | `range({ entity?, namespace?, from, to, asOf?, limit?, cursor? })` | Points in an absolute window, ascending, paginated. |
 | `around({ eventId, before?, after?, entities?, namespace?, asOf? })` | All streams in a window around an event, grouped by namespace. Defaults to the event's entities. |
+| `entities({ namespace?, prefix?, limit? })` | Catalog: entities with timeline data, point counts, namespaces and span. |
+| `namespaces()` | Catalog: streams in use with point counts, distinct entities and span. |
 
 ### `db.decisions` / `db.outcomes`
 

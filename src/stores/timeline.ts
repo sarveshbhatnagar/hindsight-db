@@ -2,7 +2,10 @@ import type { Connection } from "../storage/sqlite.js";
 import { asArray, decodeCursor, encodeCursor, inList } from "../storage/sqlite.js";
 import { toMillis, windowAround } from "../time.js";
 import type {
+  NamespaceStats,
   Page,
+  TimelineEntityStats,
+  TimelineEntityStatsQuery,
   TimelineAroundQuery,
   TimelinePoint,
   TimelinePointInput,
@@ -10,7 +13,7 @@ import type {
   TimelineStreams,
 } from "../types.js";
 import { assertEntity, assertLimit } from "../validate.js";
-import type { EventStore } from "./events.js";
+import { prefixUpperBound, type EventStore } from "./events.js";
 
 interface TimelineRow {
   id: number;
@@ -137,6 +140,45 @@ export class TimelineStore {
         ...(query.namespace !== undefined ? { namespaces: asArray(query.namespace) } : {}),
       }),
     );
+  }
+
+  /** Entities with timeline data, with point counts, namespaces and time span, most data first. */
+  async entities(query: TimelineEntityStatsQuery = {}): Promise<TimelineEntityStats[]> {
+    const limit = assertLimit("limit", query.limit, 1000, 100_000);
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    const namespaces = asArray(query.namespace);
+    if (namespaces?.length) {
+      const l = inList("namespace", namespaces);
+      clauses.push(l.sql);
+      params.push(...l.params);
+    }
+    if (query.prefix) {
+      clauses.push("entity >= ? AND entity < ?");
+      params.push(query.prefix, prefixUpperBound(query.prefix));
+    }
+    const where = clauses.length ? clauses.join(" AND ") : "1";
+    const rows = this.conn.db
+      .prepare(
+        `SELECT entity, sum(count) AS count, group_concat(namespace, char(31)) AS namespaces, min(f) AS "from", max(t) AS "to"
+         FROM (
+           SELECT entity, namespace, count(*) AS count, min(timestamp) AS f, max(timestamp) AS t
+           FROM timeline WHERE ${where} GROUP BY entity, namespace
+         )
+         GROUP BY entity ORDER BY count DESC, entity ASC LIMIT ?`,
+      )
+      .all(...params, limit) as { entity: string; count: number; namespaces: string; from: number; to: number }[];
+    return rows.map((r) => ({ ...r, namespaces: r.namespaces.split(String.fromCharCode(31)).sort() }));
+  }
+
+  /** Namespaces (streams) in use, with point counts, distinct entities and time span. */
+  async namespaces(): Promise<NamespaceStats[]> {
+    return this.conn.db
+      .prepare(
+        `SELECT namespace, count(*) AS count, count(DISTINCT entity) AS entities, min(timestamp) AS "from", max(timestamp) AS "to"
+         FROM timeline GROUP BY namespace ORDER BY count DESC, namespace ASC`,
+      )
+      .all() as NamespaceStats[];
   }
 
   /** Unpaginated window fetch used internally by `around` and the history API. */

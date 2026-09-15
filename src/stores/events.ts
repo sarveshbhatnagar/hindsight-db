@@ -2,6 +2,8 @@ import type { Connection } from "../storage/sqlite.js";
 import { asArray, chunks, decodeCursor, encodeCursor, inList } from "../storage/sqlite.js";
 import { toMillis } from "../time.js";
 import type {
+  EntityStats,
+  EntityStatsQuery,
   Event,
   EventFilters,
   EventInput,
@@ -9,6 +11,7 @@ import type {
   Page,
   SimilarEvent,
   SimilarQuery,
+  TypeStats,
 } from "../types.js";
 import { assertEntity, assertId, assertLimit, assertPlainObject } from "../validate.js";
 import { assertFiniteEmbedding, cosine, decodeEmbedding, encodeEmbedding, l2norm, toFloat32 } from "../vector.js";
@@ -73,6 +76,15 @@ function buildWhere(filters: EventFilters | undefined): { where: string; params:
     clauses.push(`e.id IN (SELECT event_id FROM event_entities WHERE ${l.sql})`);
     params.push(...l.params);
   }
+  const entitiesAll = asArray(filters.entitiesAll);
+  if (entitiesAll?.length) {
+    const distinct = [...new Set(entitiesAll)];
+    const l = inList("entity_id", distinct);
+    clauses.push(
+      `e.id IN (SELECT event_id FROM event_entities WHERE ${l.sql} GROUP BY event_id HAVING count(*) = ${distinct.length})`,
+    );
+    params.push(...l.params);
+  }
   if (filters.from !== undefined) {
     clauses.push("e.timestamp >= ?");
     params.push(toMillis(filters.from));
@@ -111,6 +123,12 @@ function buildWhere(filters: EventFilters | undefined): { where: string; params:
     params.push(...l.params);
   }
   return { where: clauses.length ? clauses.join(" AND ") : "1", params };
+}
+
+/** Smallest string greater than every string with the given prefix (for range scans on an index). */
+export function prefixUpperBound(prefix: string): string {
+  const last = prefix.codePointAt(prefix.length - 1)!;
+  return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
 }
 
 export class EventStore {
@@ -230,6 +248,54 @@ export class EventStore {
       items,
       ...(hasMore && last ? { nextCursor: encodeCursor({ t: last.timestamp, id: last.id }) } : {}),
     };
+  }
+
+  /**
+   * Entities in use across events, with counts and the event-time span they
+   * cover, most frequent first. Lets an application decide whether an entity
+   * filter is worth applying and which labels already exist.
+   */
+  async entities(query: EntityStatsQuery = {}): Promise<EntityStats[]> {
+    const limit = assertLimit("limit", query.limit, 1000, 100_000);
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    const types = asArray(query.type);
+    if (types?.length) {
+      const l = inList("e.type", types);
+      clauses.push(l.sql);
+      params.push(...l.params);
+    }
+    if (query.from !== undefined) {
+      clauses.push("e.timestamp >= ?");
+      params.push(toMillis(query.from));
+    }
+    if (query.to !== undefined) {
+      clauses.push("e.timestamp <= ?");
+      params.push(toMillis(query.to));
+    }
+    if (query.prefix) {
+      clauses.push("ee.entity_id >= ? AND ee.entity_id < ?");
+      params.push(query.prefix, prefixUpperBound(query.prefix));
+    }
+    const where = clauses.length ? clauses.join(" AND ") : "1";
+    return this.conn.db
+      .prepare(
+        `SELECT ee.entity_id AS entity, count(*) AS count, min(e.timestamp) AS firstSeen, max(e.timestamp) AS lastSeen
+         FROM event_entities ee JOIN events e ON e.id = ee.event_id
+         WHERE ${where}
+         GROUP BY ee.entity_id ORDER BY count DESC, entity ASC LIMIT ?`,
+      )
+      .all(...params, limit) as EntityStats[];
+  }
+
+  /** Event types in use, with counts and event-time span, most frequent first. */
+  async types(): Promise<TypeStats[]> {
+    return this.conn.db
+      .prepare(
+        `SELECT type, count(*) AS count, min(timestamp) AS firstSeen, max(timestamp) AS lastSeen
+         FROM events GROUP BY type ORDER BY count DESC, type ASC`,
+      )
+      .all() as TypeStats[];
   }
 
   /**

@@ -53,6 +53,8 @@ export interface EventFilters {
   type?: string | string[];
   /** Match events touching any of these entities. */
   entities?: string | string[];
+  /** Match only events touching all of these entities. Combines with `entities`. */
+  entitiesAll?: string | string[];
   /** Event-time bounds (inclusive). */
   from?: TimestampInput;
   to?: TimestampInput;
@@ -81,6 +83,55 @@ export interface SimilarEvent {
   type: string;
   entities: string[];
   metadata: Metadata;
+}
+
+/** Catalog queries: what labels exist, how often, and over what period. */
+export interface EntityStatsQuery {
+  /** Only count events of these types. */
+  type?: string | string[];
+  /** Only count events in this event-time range. */
+  from?: TimestampInput;
+  to?: TimestampInput;
+  /** Case-sensitive prefix on the entity id, e.g. "sector:". */
+  prefix?: string;
+  /** Max rows, ordered by count descending. Default 1000. */
+  limit?: number;
+}
+
+export interface EntityStats {
+  entity: string;
+  count: number;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+export interface TypeStats {
+  type: string;
+  count: number;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+export interface TimelineEntityStatsQuery {
+  namespace?: string | string[];
+  prefix?: string;
+  limit?: number;
+}
+
+export interface TimelineEntityStats {
+  entity: string;
+  count: number;
+  namespaces: string[];
+  from: number;
+  to: number;
+}
+
+export interface NamespaceStats {
+  namespace: string;
+  count: number;
+  entities: number;
+  from: number;
+  to: number;
 }
 
 export interface EventListQuery {
