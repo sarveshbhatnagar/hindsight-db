@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 CREATE INDEX IF NOT EXISTS outcomes_event    ON outcomes (event_id, timestamp);
 CREATE INDEX IF NOT EXISTS outcomes_decision ON outcomes (decision_id)`,
+  // v2: history windows query (entity, time range) without a namespace; the
+  // (entity, namespace, timestamp) index can only use its entity prefix for
+  // that shape, so add an index whose order matches the query.
+  `CREATE INDEX IF NOT EXISTS timeline_entity_ts ON timeline (entity, timestamp);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

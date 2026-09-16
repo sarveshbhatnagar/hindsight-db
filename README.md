@@ -178,7 +178,7 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 | `events.similar`, type filter (10%) | ~35 ms |
 | `events.similar`, one entity | ~50 ms |
 | `events.similar`, 1000 candidates at 1536-dim | ~5 ms |
-| `history.getMany` (≈420 timeline points/event) | ~0.5–1 ms/event |
+| `history.getMany` (≈420 timeline points/event, 800k-row timeline) | ~0.35 ms/event |
 | `timeline.range` paging | ~1.5–3 ms per 1000 points |
 | Ingest | events ~14k/s, timeline ~65k/s (2M rows), decisions ~70k/s |
 
@@ -194,7 +194,7 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 
 A filter on an entity that nearly every event carries (e.g. a catch-all tag) is *slower* than no filter, since it adds a join without pruning anything. Use `events.entities()` to check a label's count before relying on it. For a much larger event table with unfiltered queries, an ANN index is the next step.
 
-Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuilds timeline indexes (≈4.6× faster ingest of 2M rows); a `timeline(entity, timestamp)` index or per-namespace range queries for history windows (≈2× on `getMany` with many namespaces); batching `events.list`'s entity lookup (≈20%/page); batch-resolving outcome anchors in `outcomes.insertMany` (≈1.5×). Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
+Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuilds timeline indexes (≈4.6× faster ingest of 2M rows); batching `events.list`'s entity lookup (≈20%/page); batch-resolving outcome anchors in `outcomes.insertMany` (≈1.5×). Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
 
 ## Layout
 

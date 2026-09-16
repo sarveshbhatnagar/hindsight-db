@@ -49,6 +49,27 @@ describe("schema versioning on open", () => {
     db.close();
   });
 
+  it("upgrades a v1 file to v2 in place, adding the (entity, timestamp) index", async () => {
+    const path = join(dir, "v1.db");
+    const raw = new Database(path);
+    migrate(raw, MIGRATIONS.slice(0, 1));
+    raw.prepare(`INSERT INTO timeline (timestamp, observed_at, entity, namespace, data) VALUES (?, ?, 'A', 'm', '1')`).run(T0, T0);
+    expect(currentVersion(raw)).toBe(1);
+    expect(raw.prepare(`SELECT name FROM sqlite_master WHERE name = 'timeline_entity_ts'`).get()).toBeUndefined();
+    raw.close();
+
+    const db = openDatabase({ path });
+    expect(db.schemaVersion).toBeGreaterThanOrEqual(2);
+    const conn = (db as unknown as { conn: { db: Database.Database } }).conn.db;
+    expect(conn.prepare(`SELECT name FROM sqlite_master WHERE name = 'timeline_entity_ts'`).get()).toEqual({ name: "timeline_entity_ts" });
+    const plan = conn
+      .prepare(`EXPLAIN QUERY PLAN SELECT * FROM timeline WHERE entity IN (?) AND timestamp >= ? AND timestamp <= ?`)
+      .all("A", T0, T0) as { detail: string }[];
+    expect(plan[0]!.detail).toContain("timeline_entity_ts");
+    expect((await db.timeline.range({ entity: "A", from: T0, to: T0 })).items).toHaveLength(1);
+    db.close();
+  });
+
   it("refuses a file written by a newer library version", () => {
     const path = join(dir, "future.db");
     const raw = new Database(path);
