@@ -77,7 +77,9 @@ const histories = await db.history.getMany({
 
 ## API
 
-All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s and are returned as epoch ms. Durations accept ms or strings like `"7d"`, `"12h"`, `"30m"`, `"45s"`, `"500ms"`, `"2w"`.
+All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s and are returned as epoch ms. Durations accept ms or strings like `"7d"`, `"12h"`, `"30m"`, `"45s"`, `"500ms"`, `"2w"`. `addDuration(ts, "-7d")` shifts a timestamp; `parseDuration` and `windowAround` are exported too.
+
+Ids default to time-ordered UUID v7 (override with `idGenerator`).
 
 ### `db.events`
 
@@ -86,7 +88,7 @@ All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s 
 | `insert(event)` / `insertMany(events)` | Store events. `id` is generated if omitted. `observedAt` defaults to `timestamp`. |
 | `get(id, { includeEmbedding? })` / `getMany(ids)` | Fetch by id. |
 | `list({ filters?, limit?, cursor?, order? })` | Filtered, cursor-paginated listing. |
-| `similar({ event, limit?, minScore?, filters?, cursor? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. Results are ordered `(score desc, id asc)` and carry `nextCursor` when more matches exist; each page rescans candidates, so paging is exact but not cheaper than the first page. |
+| `similar({ event, limit?, minScore?, filters?, cursor? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. Results include `content` and `metadata`, are ordered `(score desc, id asc)`, and carry `nextCursor` when more matches exist; each page rescans candidates, so paging is exact but not cheaper than the first page. |
 | `delete(id)` | Delete an event and its decisions/outcomes. |
 | `addEntities(id, entities)` / `removeEntities(id, entities)` | Re-label an existing event. Adds append in order and ignore duplicates; removes ignore absent ones. |
 | `renameEntity(from, to)` | Rename a label across all events (merges with events that already carry `to`). |
@@ -145,6 +147,16 @@ Returns:
 
 `history.getMany({ eventIds, ...sameOptions })` returns one `History` per found id, in input order, with all lookups batched into a single read transaction.
 
+### `db.bulkLoad(fn)`
+
+Backfill mode. Drops all secondary indexes for the duration of `fn` and rebuilds them afterwards, turning random index inserts into sequential appends. Use for initial imports, not routine writes; reads inside `fn` work but are slow. If the process dies mid-load, the next `openDatabase` recreates any missing indexes.
+
+```ts
+await db.bulkLoad(async () => {
+  for await (const batch of readCsvBatches()) await db.timeline.insertMany(batch);
+});
+```
+
 ## Time semantics
 
 Every record distinguishes three clocks, as required by the design:
@@ -194,7 +206,7 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 
 A filter on an entity that nearly every event carries (e.g. a catch-all tag) is *slower* than no filter, since it adds a join without pruning anything. Use `events.entities()` to check a label's count before relying on it. For a much larger event table with unfiltered queries, an ANN index is the next step.
 
-Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuilds timeline indexes (≈4.6× faster ingest of 2M rows); batching `events.list`'s entity lookup (≈20%/page); batch-resolving outcome anchors in `outcomes.insertMany` (≈1.5×). Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
+Ingest: `bulkLoad` measured 1.6× on 600k in-memory timeline rows (more on large on-disk tables, where index maintenance dominates); UUID v7 ids 1.25× on event ingest vs random UUIDs. Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
 
 ## Layout
 
@@ -202,7 +214,8 @@ Known follow-ups, measured but not implemented: bulk-load mode that drops/rebuil
 src/
   index.ts            openDatabase(), HindsightDB, public exports
   types.ts            input/output types
-  time.ts             duration + timestamp parsing
+  time.ts             duration + timestamp parsing, addDuration
+  ids.ts              UUID v7 generator
   vector.ts           embedding encoding, cosine
   storage/sqlite.ts   connection + SQL helpers
   storage/migrations.ts  versioned schema (append-only)

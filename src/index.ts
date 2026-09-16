@@ -7,7 +7,8 @@ import { TimelineStore } from "./stores/timeline.js";
 import type { DatabaseOptions } from "./types.js";
 
 export * from "./types.js";
-export { parseDuration, toMillis, windowAround } from "./time.js";
+export { addDuration, parseDuration, toMillis, windowAround } from "./time.js";
+export { uuidv7 } from "./ids.js";
 export { cosine } from "./vector.js";
 export { SCHEMA_VERSION, SchemaVersionError } from "./storage/migrations.js";
 export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
@@ -41,6 +42,21 @@ export class HindsightDB {
   /** Schema version of the open file (equals SCHEMA_VERSION after open). */
   get schemaVersion(): number {
     return this.conn.db.pragma("user_version", { simple: true }) as number;
+  }
+
+  /**
+   * Backfill mode: drops secondary indexes for the duration of `fn` and
+   * rebuilds them afterwards, which makes large loads several times faster.
+   * Use for initial imports, not routine writes.
+   *
+   * ```ts
+   * await db.bulkLoad(async () => {
+   *   for await (const batch of readBatches()) await db.timeline.insertMany(batch);
+   * });
+   * ```
+   */
+  bulkLoad<T>(fn: () => T | Promise<T>): Promise<T> {
+    return this.conn.bulkLoad(fn);
   }
 
   /** Run several writes atomically. */

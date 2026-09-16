@@ -87,6 +87,7 @@ export interface SimilarEvent {
   observedAt: number;
   type: string;
   entities: string[];
+  content: Json;
   metadata: Metadata;
 }
 
@@ -296,7 +297,7 @@ export interface HistoryManyQuery extends Omit<HistoryQuery, "eventId"> {
 export interface DatabaseOptions {
   /** Path to the SQLite file. Defaults to ":memory:". */
   path?: string;
-  /** Generate ids for records inserted without one. Defaults to crypto.randomUUID. */
+  /** Generate ids for records inserted without one. Defaults to time-ordered UUID v7. */
   idGenerator?: () => string;
   /** SQLite page cache in MiB (default: SQLite's ~2 MiB). Larger values speed up scans and paging at the cost of RAM. */
   cacheSizeMb?: number;

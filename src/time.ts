@@ -58,6 +58,14 @@ export function parseDuration(input: DurationInput): number {
   return sign * Math.trunc(value * UNIT_MS[unit]!);
 }
 
+/**
+ * Shift a timestamp by a signed duration: `addDuration(event.timestamp, "-7d")`.
+ * This is the working form of the design's `event.timestamp - "7d"` pseudocode.
+ */
+export function addDuration(timestamp: TimestampInput, duration: DurationInput): number {
+  return toMillis(timestamp) + parseDuration(duration);
+}
+
 /** Resolve a "before"/"after" window around a center timestamp into absolute ms bounds. */
 export function windowAround(
   center: number,

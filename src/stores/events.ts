@@ -33,12 +33,16 @@ interface EventRow {
 /** ASCII unit separator: safe join character for entity ids. */
 const SEP = String.fromCharCode(31);
 
+/** Single-row read: entities via a correlated subquery. */
 const SELECT = `
   SELECT e.*, (
     SELECT group_concat(entity_id, char(31))
     FROM (SELECT entity_id FROM event_entities ee WHERE ee.event_id = e.id ORDER BY position)
   ) AS entities
   FROM events e`;
+
+/** Multi-row read: no per-row subquery; entities are attached afterwards in one batched query. */
+const SELECT_BARE = `SELECT e.*, NULL AS entities FROM events e`;
 
 function splitEntities(s: string | null): string[] {
   return s ? s.split(SEP) : [];
@@ -226,10 +230,25 @@ export class EventStore {
     const byId = new Map<string, Event>();
     for (const chunk of chunks(ids)) {
       const l = inList("e.id", chunk);
-      const rows = this.conn.db.prepare(`${SELECT} WHERE ${l.sql}`).all(...l.params) as EventRow[];
+      const rows = this.conn.db.prepare(`${SELECT_BARE} WHERE ${l.sql}`).all(...l.params) as EventRow[];
       for (const r of rows) byId.set(r.id, rowToEvent(r, opts.includeEmbedding ?? false));
     }
-    return ids.map((id) => byId.get(id)).filter((e): e is Event => e !== undefined);
+    const events = ids.map((id) => byId.get(id)).filter((e): e is Event => e !== undefined);
+    this.attachEntities(events);
+    return events;
+  }
+
+  /** Fill `entities` for many events with one query per chunk instead of one subquery per row. */
+  private attachEntities(events: Event[]): void {
+    if (events.length === 0) return;
+    const byId = new Map(events.map((e) => [e.id, e]));
+    for (const chunk of chunks([...byId.keys()])) {
+      const l = inList("event_id", chunk);
+      const rows = this.conn.db
+        .prepare(`SELECT event_id, entity_id FROM event_entities WHERE ${l.sql} ORDER BY event_id, position`)
+        .all(...l.params) as { event_id: string; entity_id: string }[];
+      for (const r of rows) byId.get(r.event_id)!.entities.push(r.entity_id);
+    }
   }
 
   async delete(id: string): Promise<boolean> {
@@ -295,10 +314,11 @@ export class EventStore {
     const cursorSql = cursor ? ` AND (e.timestamp ${cmp} ? OR (e.timestamp = ? AND e.id ${cmp} ?))` : "";
     const cursorParams = cursor ? [cursor.t, cursor.t, cursor.id] : [];
     const rows = this.conn.db
-      .prepare(`${SELECT} WHERE ${where}${cursorSql} ORDER BY e.timestamp ${order}, e.id ${order} LIMIT ?`)
+      .prepare(`${SELECT_BARE} WHERE ${where}${cursorSql} ORDER BY e.timestamp ${order}, e.id ${order} LIMIT ?`)
       .all(...params, ...cursorParams, limit + 1) as EventRow[];
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit).map((r) => rowToEvent(r, false));
+    this.attachEntities(items);
     const last = items[items.length - 1];
     return {
       items,
@@ -420,6 +440,7 @@ export class EventStore {
         observedAt: e.observedAt,
         type: e.type,
         entities: e.entities,
+        content: e.content,
         metadata: e.metadata,
       };
     });

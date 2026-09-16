@@ -81,6 +81,38 @@ CREATE INDEX IF NOT EXISTS outcomes_decision ON outcomes (decision_id)`,
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
+/**
+ * Secondary indexes that `bulkLoad` drops for the duration of a load and
+ * rebuilds afterwards. Kept in sync with the migrations above; `ensureIndexes`
+ * recreates any that are missing on open, so an interrupted bulk load never
+ * leaves a file without them.
+ */
+export const SECONDARY_INDEXES: Readonly<Record<string, string>> = {
+  events_timestamp: "events (timestamp)",
+  events_observed_at: "events (observed_at)",
+  events_type_ts: "events (type, timestamp)",
+  events_dim: "events (dim) WHERE embedding IS NOT NULL",
+  event_entities_entity: "event_entities (entity_id, event_id)",
+  event_entities_ordered: "event_entities (event_id, position, entity_id)",
+  timeline_entity_ns_ts: "timeline (entity, namespace, timestamp)",
+  timeline_ns_ts: "timeline (namespace, timestamp)",
+  timeline_ts: "timeline (timestamp)",
+  timeline_entity_ts: "timeline (entity, timestamp)",
+  decisions_event: "decisions (event_id, timestamp)",
+  outcomes_event: "outcomes (event_id, timestamp)",
+  outcomes_decision: "outcomes (decision_id)",
+};
+
+export function ensureIndexes(db: Database.Database): void {
+  for (const [name, def] of Object.entries(SECONDARY_INDEXES)) {
+    db.exec(`CREATE INDEX IF NOT EXISTS ${name} ON ${def}`);
+  }
+}
+
+export function dropIndexes(db: Database.Database): void {
+  for (const name of Object.keys(SECONDARY_INDEXES)) db.exec(`DROP INDEX IF EXISTS ${name}`);
+}
+
 export class SchemaVersionError extends Error {
   constructor(
     readonly fileVersion: number,

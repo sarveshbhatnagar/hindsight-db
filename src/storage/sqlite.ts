@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
+import { uuidv7 } from "../ids.js";
 import type { DatabaseOptions } from "../types.js";
-import { migrate } from "./migrations.js";
+import { dropIndexes, ensureIndexes, migrate } from "./migrations.js";
 
 
 export class Connection {
@@ -16,11 +16,12 @@ export class Connection {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     migrate(this.db);
+    ensureIndexes(this.db); // repairs a file left without indexes by an interrupted bulkLoad
     if (options.cacheSizeMb !== undefined) {
       if (!Number.isFinite(options.cacheSizeMb) || options.cacheSizeMb <= 0) throw new TypeError("cacheSizeMb must be > 0");
       this.db.pragma(`cache_size = -${Math.round(options.cacheSizeMb * 1024)}`);
     }
-    this.newId = options.idGenerator ?? randomUUID;
+    this.newId = options.idGenerator ?? uuidv7;
     this.jsonValid = this.db.prepare("SELECT json_valid(?) AS ok");
   }
 
@@ -51,6 +52,26 @@ export class Connection {
     } finally {
       this.depth--;
       if (outer) this.nestedError = undefined;
+    }
+  }
+
+  private bulkLoading = false;
+
+  /**
+   * Run `fn` with all secondary indexes dropped, then rebuild them. Large
+   * backfills become sequential appends instead of random index inserts.
+   * Reads issued inside `fn` still work but are slow (no indexes).
+   */
+  async bulkLoad<T>(fn: () => T | Promise<T>): Promise<T> {
+    if (this.bulkLoading) throw new Error("bulkLoad() cannot be nested");
+    if (this.depth > 0) throw new Error("bulkLoad() cannot run inside a transaction");
+    this.bulkLoading = true;
+    dropIndexes(this.db);
+    try {
+      return await fn();
+    } finally {
+      ensureIndexes(this.db);
+      this.bulkLoading = false;
     }
   }
 

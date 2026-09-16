@@ -41,8 +41,6 @@ export class OutcomeStore {
       ),
       get: this.conn.db.prepare(`SELECT * FROM outcomes WHERE id = ?`),
       byEvent: this.conn.db.prepare(`SELECT * FROM outcomes WHERE event_id = ? ORDER BY timestamp ASC, id ASC`),
-      eventTs: this.conn.db.prepare(`SELECT timestamp FROM events WHERE id = ?`),
-      decisionTs: this.conn.db.prepare(`SELECT event_id, timestamp FROM decisions WHERE id = ?`),
     };
   }
 
@@ -53,16 +51,19 @@ export class OutcomeStore {
 
   /** Insert many outcomes atomically. Validates that any referenced decision belongs to `eventId`. */
   async insertMany(inputs: OutcomeInput[]): Promise<Outcome[]> {
-    const rows = this.conn.transaction(() =>
-      inputs.map((input) => {
+    const rows = this.conn.transaction(() => {
+      for (const input of inputs) {
         assertId("outcome.eventId", input.eventId);
         if (input.decisionId !== undefined && input.decisionId !== null) assertId("outcome.decisionId", input.decisionId);
         if (input.result === undefined) throw new TypeError("outcome.result is required");
+      }
+      const anchors = this.resolveAnchors(inputs);
+      return inputs.map((input) => {
         const horizonMs = parseDuration(input.horizon);
         if (horizonMs < 0) throw new TypeError(`outcome.horizon must not be negative (got ${String(input.horizon)})`);
         const horizon = typeof input.horizon === "string" ? input.horizon.trim() : `${horizonMs}ms`;
         // Always resolve the anchor: it is also the event/decision consistency check.
-        const anchor = this.anchorTimestamp(input);
+        const anchor = anchors(input);
         const timestamp = input.timestamp !== undefined ? toMillis(input.timestamp) : anchor + horizonMs;
         const row = {
           id: input.id === undefined ? this.conn.newId() : assertId("outcome.id", input.id),
@@ -76,27 +77,54 @@ export class OutcomeStore {
         };
         this.prepared.insert.run(row);
         return row;
-      }),
-    );
+      });
+    });
     return rows.map(rowToOutcome);
   }
 
   /**
-   * The decision's timestamp if a decision is referenced, otherwise the event's.
-   * Throws if the event/decision does not exist or the decision belongs to another event.
+   * Look up every referenced decision and event in one query each, then
+   * return a resolver: the decision's timestamp if a decision is referenced,
+   * otherwise the event's. The resolver throws if the event/decision does not
+   * exist or the decision belongs to another event.
    */
-  private anchorTimestamp(input: OutcomeInput): number {
-    if (input.decisionId) {
-      const d = this.prepared.decisionTs.get(input.decisionId) as { event_id: string; timestamp: number } | undefined;
-      if (!d) throw new Error(`Decision not found: ${input.decisionId}`);
-      if (d.event_id !== input.eventId) {
-        throw new Error(`Decision ${input.decisionId} belongs to event ${d.event_id}, not ${input.eventId}`);
+  private resolveAnchors(inputs: OutcomeInput[]): (input: OutcomeInput) => number {
+    const decisionIds = [...new Set(inputs.flatMap((i) => (i.decisionId ? [i.decisionId] : [])))];
+    const eventIds = [...new Set(inputs.flatMap((i) => (i.decisionId ? [] : [i.eventId])))];
+    const decisions = new Map<string, { event_id: string; timestamp: number }>();
+    for (const chunk of chunks(decisionIds)) {
+      const l = inList("id", chunk);
+      for (const d of this.conn.db.prepare(`SELECT id, event_id, timestamp FROM decisions WHERE ${l.sql}`).all(...l.params) as {
+        id: string;
+        event_id: string;
+        timestamp: number;
+      }[]) {
+        decisions.set(d.id, d);
       }
-      return d.timestamp;
     }
-    const e = this.prepared.eventTs.get(input.eventId) as { timestamp: number } | undefined;
-    if (!e) throw new Error(`Event not found: ${input.eventId}`);
-    return e.timestamp;
+    const events = new Map<string, number>();
+    for (const chunk of chunks(eventIds)) {
+      const l = inList("id", chunk);
+      for (const e of this.conn.db.prepare(`SELECT id, timestamp FROM events WHERE ${l.sql}`).all(...l.params) as {
+        id: string;
+        timestamp: number;
+      }[]) {
+        events.set(e.id, e.timestamp);
+      }
+    }
+    return (input) => {
+      if (input.decisionId) {
+        const d = decisions.get(input.decisionId);
+        if (!d) throw new Error(`Decision not found: ${input.decisionId}`);
+        if (d.event_id !== input.eventId) {
+          throw new Error(`Decision ${input.decisionId} belongs to event ${d.event_id}, not ${input.eventId}`);
+        }
+        return d.timestamp;
+      }
+      const ts = events.get(input.eventId);
+      if (ts === undefined) throw new Error(`Event not found: ${input.eventId}`);
+      return ts;
+    };
   }
 
   async get(id: string): Promise<Outcome | undefined> {
