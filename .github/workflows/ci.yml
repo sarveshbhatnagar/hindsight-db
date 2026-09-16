@@ -19,8 +19,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
+      # No lockfile: npm can only lock native optional deps (better-sqlite3,
+      # rolldown, lightningcss, ...) for the platform that generated it
+      # (npm/cli#4828), which breaks `npm ci` on every other OS.
+      - run: npm install
       - run: npm run typecheck
       - run: npm test
       - run: npm run build

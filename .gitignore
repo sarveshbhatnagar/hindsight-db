@@ -6,3 +6,4 @@ dist/
 *.db-shm
 .DS_Store
 .remember/
+package-lock.json
