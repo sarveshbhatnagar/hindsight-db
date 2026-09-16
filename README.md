@@ -22,7 +22,7 @@ npm test           # vitest
 npm run build      # emits dist/
 ```
 
-Requires Node 18+.
+Requires Node 22+.
 
 ## Quick start
 
