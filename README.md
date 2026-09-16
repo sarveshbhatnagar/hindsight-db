@@ -225,6 +225,15 @@ src/
 tests/                vitest, one file per store + end-to-end flow
 ```
 
+## Releasing
+
+Releases are automated. Bump the version and push the tag; CI publishes to npm (via trusted publishing, no tokens) and creates the GitHub release:
+
+```sh
+npm run release patch      # or minor / major — runs checks, bumps package.json, commits, tags
+git push --follow-tags
+```
+
 ## License
 
 MIT

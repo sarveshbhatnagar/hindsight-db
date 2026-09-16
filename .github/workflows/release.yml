@@ -1,0 +1,52 @@
+name: Release
+
+# Publishes to npm and creates a GitHub release whenever a v* tag is pushed.
+# Authentication is npm trusted publishing (OIDC) — no NPM_TOKEN secret.
+# One-time setup on npmjs.com: package Settings → Trusted publisher →
+# GitHub Actions, repository sarveshbhatnagar/hindsight-db, workflow release.yml.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # OIDC token for npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@latest && npm --version
+
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Check tag matches package.json version
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"; exit 1
+          fi
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "hindsight-db ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag
