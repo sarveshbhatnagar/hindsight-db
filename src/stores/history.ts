@@ -1,14 +1,24 @@
 import type { Connection } from "../storage/sqlite.js";
 import { asArray } from "../storage/sqlite.js";
 import { toMillis, windowAround } from "../time.js";
-import type { Decision, Event, History, HistoryManyQuery, HistoryQuery, Outcome, TimelinePoint } from "../types.js";
+import type {
+  Decision,
+  Event,
+  History,
+  HistoryManyQuery,
+  HistoryQuery,
+  Outcome,
+  TimelineRangeQuery,
+} from "../types.js";
+import { assertLimit } from "../validate.js";
 import type { DecisionStore } from "./decisions.js";
 import type { EventStore } from "./events.js";
 import type { OutcomeStore } from "./outcomes.js";
-import { groupByNamespace, type TimelineStore, type TimelineWindowSpec } from "./timeline.js";
+import { groupByNamespace, type TimelineStore, type TimelineWindow, type TimelineWindowSpec } from "./timeline.js";
 
 const DEFAULT_BEFORE = "7d";
 const DEFAULT_AFTER = "0ms";
+const DEFAULT_MAX_POINTS = 100_000;
 
 type WindowOptions = Omit<HistoryQuery, "eventId">;
 
@@ -55,6 +65,8 @@ export class HistoryStore {
     const events = await this.events.getMany(ids);
     if (events.length === 0) return [];
 
+    // Capped at timeline.range's page limit so `truncated.next` is always a valid range query.
+    const maxPoints = assertLimit("maxPoints", opts.maxPoints, DEFAULT_MAX_POINTS, DEFAULT_MAX_POINTS);
     const windows = events.map((e) => resolveWindow(e, opts));
     const specs: TimelineWindowSpec[] = events.map((e, i) => {
       const w = windows[i]!;
@@ -66,6 +78,7 @@ export class HistoryStore {
         asOf: w.outcomeUntil,
         ...(entities && entities.length ? { entities } : {}),
         ...(opts.namespace !== undefined ? { namespaces: asArray(opts.namespace) } : {}),
+        limit: maxPoints,
       };
     });
 
@@ -77,7 +90,7 @@ export class HistoryStore {
     ]);
 
     return events.map((event, i) =>
-      assemble(event, windows[i]!, points[i]!, decisionsByEvent.get(event.id)!, outcomesByEvent.get(event.id)!),
+      assemble(event, windows[i]!, specs[i]!, points[i]!, decisionsByEvent.get(event.id)!, outcomesByEvent.get(event.id)!),
     );
   }
 }
@@ -105,11 +118,13 @@ function resolveWindow(event: Event, opts: WindowOptions): ResolvedWindow {
 function assemble(
   event: Event,
   w: ResolvedWindow,
-  points: TimelinePoint[],
+  spec: TimelineWindowSpec,
+  window: TimelineWindow,
   decisions: Decision[],
   outcomes: Outcome[],
 ): History {
-  return {
+  const { points } = window;
+  const history: History = {
     event,
     context: groupByNamespace(points.filter((p) => p.observedAt <= w.contextUntil)),
     timeline: groupByNamespace(points.filter((p) => p.observedAt <= w.outcomeUntil)),
@@ -117,4 +132,18 @@ function assemble(
     outcomes: outcomes.filter((o) => o.timestamp <= w.outcomeUntil),
     window: w,
   };
+  const last = points[points.length - 1];
+  if (window.nextCursor && last) {
+    const next: TimelineRangeQuery = {
+      from: spec.from,
+      to: spec.to,
+      asOf: w.outcomeUntil,
+      ...(spec.entities ? { entity: spec.entities } : {}),
+      ...(spec.namespaces ? { namespace: spec.namespaces } : {}),
+      limit: spec.limit!,
+      cursor: window.nextCursor,
+    };
+    history.truncated = { at: { timestamp: last.timestamp, id: last.id }, next };
+  }
+  return history;
 }

@@ -86,7 +86,7 @@ All methods return promises. Timestamps accept epoch ms, ISO strings or `Date`s 
 | `insert(event)` / `insertMany(events)` | Store events. `id` is generated if omitted. `observedAt` defaults to `timestamp`. |
 | `get(id, { includeEmbedding? })` / `getMany(ids)` | Fetch by id. |
 | `list({ filters?, limit?, cursor?, order? })` | Filtered, cursor-paginated listing. |
-| `similar({ event, limit?, minScore?, filters? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. |
+| `similar({ event, limit?, minScore?, filters?, cursor? })` | Cosine similarity search. `event` may be an id, an embedding, or `{ id?, embedding? }`. The query event is always excluded. Results are ordered `(score desc, id asc)` and carry `nextCursor` when more matches exist; each page rescans candidates, so paging is exact but not cheaper than the first page. |
 | `delete(id)` | Delete an event and its decisions/outcomes. |
 | `addEntities(id, entities)` / `removeEntities(id, entities)` | Re-label an existing event. Adds append in order and ignore duplicates; removes ignore absent ones. |
 | `renameEntity(from, to)` | Rename a label across all events (merges with events that already carry `to`). |
@@ -127,6 +127,7 @@ const h = await db.history.get({
   outcomeUntil?: ...,    // observation-time cutoff for `timeline`/`decisions`/`outcomes` (default: max(event.timestamp + after, contextUntil))
   entities?: ...,        // default: the event's entities
   namespace?: ...,
+  maxPoints?: 100000,    // cap on timeline points per event (default and max 100 000)
 });
 ```
 
@@ -140,6 +141,7 @@ Returns:
 | `decisions` | Decisions with `timestamp ≤ outcomeUntil`. |
 | `outcomes` | Outcomes with outcome time `≤ outcomeUntil`. |
 | `window` | The resolved `{ from, to, contextUntil, outcomeUntil }` in ms. |
+| `truncated?` | Present when the window held more than `maxPoints` points: `{ at: { timestamp, id }, next }`, where `next` is a ready-made `timeline.range` query for the remainder (page through it with its `nextCursor`; filter items by `observedAt <= window.contextUntil` to extend `context`). |
 
 `history.getMany({ eventIds, ...sameOptions })` returns one `History` per found id, in input order, with all lookups batched into a single read transaction.
 

@@ -73,7 +73,12 @@ export interface SimilarQuery {
   /** Discard results below this cosine similarity. */
   minScore?: number;
   filters?: EventFilters;
+  /** Opaque cursor from a previous result's `nextCursor` to fetch the next page of matches. */
+  cursor?: string;
 }
+
+/** Ranked matches; `nextCursor` is set when more matches exist beyond `limit`. */
+export type SimilarResults = SimilarEvent[] & { nextCursor?: string };
 
 export interface SimilarEvent {
   id: string;
@@ -257,6 +262,13 @@ export interface HistoryQuery {
   outcomeUntil?: TimestampInput;
   entities?: string | string[];
   namespace?: string | string[];
+  /**
+   * Cap on timeline points fetched per event (across all streams), in
+   * (timestamp, id) order. Default 100 000. When the window holds more, the
+   * result carries `truncated` with a ready-made `timeline.range` query for
+   * the remainder.
+   */
+  maxPoints?: number;
 }
 
 export interface History {
@@ -268,6 +280,13 @@ export interface History {
   decisions: Decision[];
   outcomes: Outcome[];
   window: { from: number; to: number; contextUntil: number; outcomeUntil: number };
+  /**
+   * Present when the window held more than `maxPoints` timeline points.
+   * `context` and `timeline` contain every point up to and including
+   * (timestamp, id) = `at`; pass `next` to `timeline.range` for the rest
+   * (filter its items by `observedAt <= window.contextUntil` for context).
+   */
+  truncated?: { at: { timestamp: number; id: number }; next: TimelineRangeQuery };
 }
 
 export interface HistoryManyQuery extends Omit<HistoryQuery, "eventId"> {

@@ -48,6 +48,14 @@ export interface TimelineWindowSpec {
   asOf?: number;
   entities?: string[];
   namespaces?: string[];
+  /** Fetch at most this many points; the result reports whether more exist. */
+  limit?: number;
+}
+
+export interface TimelineWindow {
+  points: TimelinePoint[];
+  /** Set when `limit` cut the window: the keyset cursor for the remainder. */
+  nextCursor?: string;
 }
 
 export class TimelineStore {
@@ -138,7 +146,7 @@ export class TimelineStore {
         ...(query.asOf !== undefined ? { asOf: toMillis(query.asOf) } : {}),
         ...(entities && entities.length ? { entities } : {}),
         ...(query.namespace !== undefined ? { namespaces: asArray(query.namespace) } : {}),
-      }),
+      }).points,
     );
   }
 
@@ -181,20 +189,26 @@ export class TimelineStore {
       .all() as NamespaceStats[];
   }
 
-  /** Unpaginated window fetch used internally by `around` and the history API. */
-  fetchWindow(spec: TimelineWindowSpec): TimelinePoint[] {
+  /** Window fetch used internally by `around` and the history API; unbounded unless `spec.limit` is set. */
+  fetchWindow(spec: TimelineWindowSpec): TimelineWindow {
     const { where, params } = this.buildWhere(spec);
-    const rows = this.conn.db
-      .prepare(`SELECT * FROM timeline WHERE ${where} ORDER BY timestamp ASC, id ASC`)
-      .all(...params) as TimelineRow[];
-    return rows.map(rowToPoint);
+    const sql = `SELECT * FROM timeline WHERE ${where} ORDER BY timestamp ASC, id ASC`;
+    if (spec.limit === undefined) {
+      return { points: (this.conn.db.prepare(sql).all(...params) as TimelineRow[]).map(rowToPoint) };
+    }
+    const rows = this.conn.db.prepare(`${sql} LIMIT ?`).all(...params, spec.limit + 1) as TimelineRow[];
+    const points = rows.slice(0, spec.limit).map(rowToPoint);
+    const last = points[points.length - 1];
+    return rows.length > spec.limit && last
+      ? { points, nextCursor: encodeCursor({ t: last.timestamp, id: last.id }) }
+      : { points };
   }
 
   /**
    * Fetch several windows in one read transaction. Each window is returned
    * sorted ascending by (timestamp, id), in the same order as `specs`.
    */
-  fetchWindows(specs: TimelineWindowSpec[]): TimelinePoint[][] {
+  fetchWindows(specs: TimelineWindowSpec[]): TimelineWindow[] {
     if (specs.length === 0) return [];
     return this.conn.transaction(() => specs.map((s) => this.fetchWindow(s)));
   }

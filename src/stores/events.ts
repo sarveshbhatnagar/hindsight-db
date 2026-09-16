@@ -11,6 +11,7 @@ import type {
   Page,
   SimilarEvent,
   SimilarQuery,
+  SimilarResults,
   TypeStats,
 } from "../types.js";
 import { assertEntity, assertId, assertLimit, assertPlainObject } from "../validate.js";
@@ -123,6 +124,11 @@ function buildWhere(filters: EventFilters | undefined): { where: string; params:
     params.push(...l.params);
   }
   return { where: clauses.length ? clauses.join(" AND ") : "1", params };
+}
+
+/** Ordering for similarity results: higher score first, then id ascending for determinism. */
+function ranksBefore(a: { id: string; score: number }, b: { id: string; score: number }): boolean {
+  return a.score > b.score || (a.score === b.score && a.id < b.id);
 }
 
 /** Smallest string greater than every string with the given prefix (for range scans on an index). */
@@ -351,8 +357,12 @@ export class EventStore {
   /**
    * Vector similarity search (cosine). Candidates are narrowed by `filters` in
    * SQL, then scored in-process. The query event itself is always excluded.
+   *
+   * Results are ordered by (score desc, id asc). Pass the returned
+   * `nextCursor` back as `cursor` for the next page; each page rescans the
+   * candidates, so paging is exact but costs as much as the first page.
    */
-  async similar(query: SimilarQuery): Promise<SimilarEvent[]> {
+  async similar(query: SimilarQuery): Promise<SimilarResults> {
     const limit = assertLimit("limit", query.limit, 20, Number.MAX_SAFE_INTEGER);
     const { vector, selfId } = await this.resolveQueryVector(query.event);
     assertFiniteEmbedding(vector);
@@ -366,6 +376,8 @@ export class EventStore {
       throw new TypeError("minScore must be a finite number");
     }
     const minScore = query.minScore ?? -Infinity;
+    // Keyset on (score desc, id asc): only candidates strictly after the cursor qualify.
+    const after = decodeCursor<{ s: number; id: string }>(query.cursor);
 
     // Scan only what scoring needs; everything else is fetched for the few hits afterwards.
     // When other filters are present, `+e.dim` stops the planner from choosing the
@@ -381,20 +393,25 @@ export class EventStore {
       for (const r of rows) {
         const score = cosine(vector, decodeEmbedding(r.embedding!), qnorm, r.norm ?? undefined);
         if (score < minScore) continue;
-        if (top.length === limit && score <= top[top.length - 1]!.score) continue;
+        if (after && !(score < after.s || (score === after.s && r.id > after.id))) continue;
+        const hit = { id: r.id, score };
+        if (top.length === limit + 1 && !ranksBefore(hit, top[top.length - 1]!)) continue;
         let i = top.length;
-        while (i > 0 && top[i - 1]!.score < score) i--;
-        top.splice(i, 0, { id: r.id, score });
-        if (top.length > limit) top.pop();
+        while (i > 0 && ranksBefore(hit, top[i - 1]!)) i--;
+        top.splice(i, 0, hit);
+        if (top.length > limit + 1) top.pop();
       }
     } finally {
       // Never leave the statement open (it would mark the connection busy).
       rows.return?.();
     }
 
-    const hits = await this.getMany(top.map((t) => t.id));
+    // We kept limit + 1 to learn whether another page exists.
+    const hasMore = top.length > limit;
+    const page = top.slice(0, limit);
+    const hits = await this.getMany(page.map((t) => t.id));
     const byId = new Map(hits.map((h) => [h.id, h]));
-    return top.map(({ id, score }) => {
+    const results: SimilarResults = page.map(({ id, score }) => {
       const e = byId.get(id)!;
       return {
         id,
@@ -406,6 +423,9 @@ export class EventStore {
         metadata: e.metadata,
       };
     });
+    const last = page[page.length - 1];
+    if (hasMore && last) results.nextCursor = encodeCursor({ s: last.score, id: last.id });
+    return results;
   }
 
   private async resolveQueryVector(
