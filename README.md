@@ -1,5 +1,7 @@
 # hindsight-db
 
+[![CI](https://github.com/sarveshbhatnagar/hindsight-db/actions/workflows/ci.yml/badge.svg)](https://github.com/sarveshbhatnagar/hindsight-db/actions/workflows/ci.yml)
+
 Embedded database for looking back at historical events the way a decision-maker saw them at the time — and what happened next. It stores multiple related views of historical data:
 
 ```
@@ -222,3 +224,7 @@ src/
   stores/             events, timeline, decisions, outcomes, history
 tests/                vitest, one file per store + end-to-end flow
 ```
+
+## License
+
+MIT

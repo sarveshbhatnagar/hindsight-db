@@ -12,7 +12,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -32,5 +34,23 @@
     "@types/node": "^26.5.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sarveshbhatnagar/hindsight-db.git"
+  },
+  "homepage": "https://github.com/sarveshbhatnagar/hindsight-db#readme",
+  "bugs": {
+    "url": "https://github.com/sarveshbhatnagar/hindsight-db/issues"
+  },
+  "keywords": [
+    "sqlite",
+    "embedded",
+    "time-series",
+    "events",
+    "vector-search",
+    "backtesting",
+    "point-in-time",
+    "agents"
+  ]
 }
