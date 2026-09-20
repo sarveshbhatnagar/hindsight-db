@@ -77,6 +77,71 @@ CREATE INDEX IF NOT EXISTS outcomes_decision ON outcomes (decision_id)`,
   // (entity, namespace, timestamp) index can only use its entity prefix for
   // that shape, so add an index whose order matches the query.
   `CREATE INDEX IF NOT EXISTS timeline_entity_ts ON timeline (entity, timestamp);`,
+  // v3: events may live outside this file (an external EventProvider), so
+  // decisions/outcomes can no longer reference `events` directly. They now
+  // reference `event_refs`, a local stub of (id, timestamp, observed_at) that
+  // the SQLite event store keeps in sync through triggers and that an
+  // external provider fills on demand. `entity_aliases` maps external entity
+  // ids to the labels timeline data is keyed by.
+  //
+  // Rebuilding a table with a new FK target is the SQLite create/copy/drop/
+  // rename dance; `migrate()` runs it with foreign_keys OFF (otherwise the
+  // DROP would cascade) and checks integrity before committing.
+  `
+CREATE TABLE event_refs (
+  id          TEXT PRIMARY KEY,
+  timestamp   INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL
+);
+INSERT INTO event_refs (id, timestamp, observed_at) SELECT id, timestamp, observed_at FROM events;
+
+CREATE TRIGGER events_ai AFTER INSERT ON events BEGIN
+  INSERT INTO event_refs (id, timestamp, observed_at) VALUES (NEW.id, NEW.timestamp, NEW.observed_at)
+  ON CONFLICT (id) DO UPDATE SET timestamp = excluded.timestamp, observed_at = excluded.observed_at;
+END;
+CREATE TRIGGER events_au AFTER UPDATE OF id, timestamp, observed_at ON events BEGIN
+  UPDATE event_refs SET id = NEW.id, timestamp = NEW.timestamp, observed_at = NEW.observed_at WHERE id = OLD.id;
+END;
+CREATE TRIGGER events_ad AFTER DELETE ON events BEGIN
+  DELETE FROM event_refs WHERE id = OLD.id;
+END;
+
+CREATE TABLE decisions_v3 (
+  id        TEXT PRIMARY KEY,
+  event_id  TEXT NOT NULL REFERENCES event_refs(id) ON DELETE CASCADE,
+  timestamp INTEGER NOT NULL,
+  action    TEXT NOT NULL,         -- JSON
+  metadata  TEXT NOT NULL          -- JSON object
+);
+INSERT INTO decisions_v3 (id, event_id, timestamp, action, metadata)
+  SELECT id, event_id, timestamp, action, metadata FROM decisions;
+DROP TABLE decisions;
+ALTER TABLE decisions_v3 RENAME TO decisions;
+CREATE INDEX decisions_event ON decisions (event_id, timestamp);
+
+CREATE TABLE outcomes_v3 (
+  id          TEXT PRIMARY KEY,
+  event_id    TEXT NOT NULL REFERENCES event_refs(id) ON DELETE CASCADE,
+  decision_id TEXT REFERENCES decisions(id) ON DELETE SET NULL,
+  timestamp   INTEGER NOT NULL,    -- outcome (observation) time
+  horizon     TEXT NOT NULL,
+  horizon_ms  INTEGER NOT NULL,
+  result      TEXT NOT NULL,       -- JSON
+  metadata    TEXT NOT NULL        -- JSON object
+);
+INSERT INTO outcomes_v3 (id, event_id, decision_id, timestamp, horizon, horizon_ms, result, metadata)
+  SELECT id, event_id, decision_id, timestamp, horizon, horizon_ms, result, metadata FROM outcomes;
+DROP TABLE outcomes;
+ALTER TABLE outcomes_v3 RENAME TO outcomes;
+CREATE INDEX outcomes_event    ON outcomes (event_id, timestamp);
+CREATE INDEX outcomes_decision ON outcomes (decision_id);
+
+CREATE TABLE entity_aliases (
+  external_id TEXT NOT NULL,       -- e.g. an insights entity id "42"
+  entity      TEXT NOT NULL,       -- timeline label, e.g. "AAPL"
+  PRIMARY KEY (external_id, entity)
+);
+CREATE INDEX entity_aliases_entity ON entity_aliases (entity, external_id)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -101,6 +166,7 @@ export const SECONDARY_INDEXES: Readonly<Record<string, string>> = {
   decisions_event: "decisions (event_id, timestamp)",
   outcomes_event: "outcomes (event_id, timestamp)",
   outcomes_decision: "outcomes (decision_id)",
+  entity_aliases_entity: "entity_aliases (entity, external_id)",
 };
 
 export function ensureIndexes(db: Database.Database): void {
@@ -138,12 +204,29 @@ export function migrate(db: Database.Database, migrations: readonly string[] = M
   const from = currentVersion(db);
   if (from > migrations.length) throw new SchemaVersionError(from, migrations.length);
   const applied: number[] = [];
-  for (let v = from; v < migrations.length; v++) {
-    db.transaction(() => {
-      db.exec(migrations[v]!);
-      db.pragma(`user_version = ${v + 1}`);
-    })();
-    applied.push(v + 1);
+  if (from === migrations.length) return applied;
+  // Table rebuilds (create/copy/drop/rename) must run with foreign keys off,
+  // or the DROP cascades into referencing rows. The pragma is a no-op inside
+  // a transaction, so toggle it around each one and verify integrity before
+  // committing; the rollback on failure covers the rebuild as well.
+  const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;
+  if (foreignKeys) db.pragma("foreign_keys = OFF");
+  try {
+    for (let v = from; v < migrations.length; v++) {
+      db.transaction(() => {
+        db.exec(migrations[v]!);
+        if (foreignKeys) {
+          const violations = db.pragma("foreign_key_check") as unknown[];
+          if (violations.length > 0) {
+            throw new Error(`Migration to schema version ${v + 1} left ${violations.length} foreign key violation(s)`);
+          }
+        }
+        db.pragma(`user_version = ${v + 1}`);
+      })();
+      applied.push(v + 1);
+    }
+  } finally {
+    if (foreignKeys) db.pragma("foreign_keys = ON");
   }
   return applied;
 }

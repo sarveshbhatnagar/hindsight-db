@@ -107,7 +107,7 @@ Events can carry any number of entities. Entities are the indexed, filterable la
 | --- | --- |
 | `insert(point)` / `insertMany(points)` | Store timestamped data under an `entity` and `namespace` (`market`, `news`, `macro`, `signals`, `positions`, or anything custom). |
 | `range({ entity?, namespace?, from, to, asOf?, limit?, cursor? })` | Points in an absolute window, ascending, paginated. |
-| `around({ eventId, before?, after?, entities?, namespace?, asOf? })` | All streams in a window around an event, grouped by namespace. Defaults to the event's entities. |
+| `around({ eventId, before?, after?, entities?, namespace?, asOf? })` | All streams in a window around an event, grouped by namespace. Defaults to the event's entities, expanded through `db.aliases`. |
 | `entities({ namespace?, prefix?, limit? })` | Catalog: entities with timeline data, point counts, namespaces and span. |
 | `namespaces()` | Catalog: streams in use with point counts, distinct entities and span. |
 
@@ -120,6 +120,23 @@ Events can carry any number of entities. Entities are the indexed, filterable la
 | `outcomes.insert({ eventId, decisionId?, horizon, result, timestamp? })` | Attach an observed result. Outcome time defaults to the decision's (or event's) timestamp + `horizon`. |
 | `outcomes.forEvent(eventId, { until? })` | Outcomes for an event, ascending by outcome time. |
 
+### `db.aliases`
+
+Events and timeline data may name the same entity differently — an event imported from another system might carry an entity id such as `"42"` while its prices are stored under `"AAPL"`. Aliases bridge the two: whenever an event's own entities select its timeline window (`timeline.around`, `history.get`/`getMany` without an explicit `entities`), each entity is expanded to itself plus its aliases. The table is empty by default, so nothing changes until you add one.
+
+| Method | Description |
+| --- | --- |
+| `add(externalId, entity \| entity[])` | Map an external id to one or more timeline labels. Existing pairs are ignored. |
+| `remove(externalId, entity)` | Remove one mapping; returns whether it existed. |
+| `forExternal(externalIds)` | `Map<externalId, entity[]>` for each requested id (empty list when unmapped). |
+| `list({ prefix?, limit? })` | All mappings ordered by `(externalId, entity)`; `prefix` filters on the external id. |
+
+```ts
+await db.events.insert({ id: "q3", timestamp: "2024-01-25", type: "earnings", entities: ["42"] });
+await db.aliases.add("42", "AAPL");
+const h = await db.history.get({ eventId: "q3" }); // includes timeline points stored under "AAPL"
+```
+
 ### `db.history`
 
 ```ts
@@ -129,7 +146,7 @@ const h = await db.history.get({
   after: "5d",           // window after event time (default: 0, or far enough to cover outcomeUntil)
   contextUntil?: ...,    // observation-time cutoff for `context` (default: event.observedAt)
   outcomeUntil?: ...,    // observation-time cutoff for `timeline`/`decisions`/`outcomes` (default: max(event.timestamp + after, contextUntil))
-  entities?: ...,        // default: the event's entities
+  entities?: ...,        // default: the event's entities, expanded through db.aliases
   namespace?: ...,
   maxPoints?: 100000,    // cap on timeline points per event (default and max 100 000)
 });
@@ -190,7 +207,8 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 ## Implementation notes
 
 - **Storage**: a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events). All stores share one connection.
-- **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one.
+- **Event stubs**: decisions and outcomes do not reference the `events` table directly but `event_refs`, a local `(id, timestamp, observed_at)` stub per event. In the default setup triggers keep it in sync with `events` (inserts, timestamp updates, deletes — the cascade from an event delete flows through it), so it is invisible. It exists so events can live in another database: with `openDatabase({ events: provider })`, `decisions.insert`/`outcomes.insert` fetch the stubs for ids they have not seen from `provider.getMany` *before* opening their write transaction, so `outcomes.insert` still resolves its default timestamp locally and synchronously. Ids the provider does not know fail as unknown events. Once an event's stub exists, later writes for it are synchronous again and may run inside `db.transaction()`.
+- **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one. `migrate()` runs with foreign keys off (a table rebuild's `DROP` would otherwise cascade) and refuses to commit a migration that leaves a foreign-key violation. Versions so far: **v1** initial schema; **v2** `timeline (entity, timestamp)` index; **v3** `event_refs` (decisions/outcomes rebuilt to reference it, populated from existing events) and `entity_aliases`. Opening a v2 file upgrades it in place, keeping all decision and outcome rows.
 - **Vector search**: embeddings are stored as Float32 blobs (native byte order) with a precomputed L2 norm; non-finite components are rejected at insert and query time. `similar()` narrows candidates with SQL filters, then scores cosine similarity in-process with a bounded top-k. This is exact, not approximate — fine up to roughly 10⁵ events per query; swap in an ANN index behind the same interface when that stops being true.
 - **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout, and the event side is behind the `EventProvider` interface, so a networked event store (e.g. Postgres + pgvector) can be dropped in via `openDatabase({ events })` without changing callers.
 - **Pagination**: `events.list` and `timeline.range` use opaque keyset cursors on `(timestamp, id)`.
@@ -237,9 +255,10 @@ src/
   vector.ts           embedding encoding, cosine
   storage/sqlite.ts   connection + SQL helpers
   storage/migrations.ts  versioned schema (append-only)
+  storage/event-refs.ts  local event stubs that decisions/outcomes reference
   events/provider.ts  EventProvider interface (read side of an event source)
   events/sqlite.ts    SqliteEventStore, the default provider (adds writes)
-  stores/             timeline, decisions, outcomes, history
+  stores/             timeline, decisions, outcomes, history, aliases
 tests/                vitest, one file per store + end-to-end flow
 ```
 

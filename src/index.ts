@@ -1,6 +1,8 @@
 import type { EventProvider } from "./events/provider.js";
 import { SqliteEventStore } from "./events/sqlite.js";
+import { EventRefStore } from "./storage/event-refs.js";
 import { Connection } from "./storage/sqlite.js";
+import { AliasStore } from "./stores/aliases.js";
 import { DecisionStore } from "./stores/decisions.js";
 import { HistoryStore } from "./stores/history.js";
 import { OutcomeStore } from "./stores/outcomes.js";
@@ -12,7 +14,8 @@ export { addDuration, parseDuration, toMillis, windowAround } from "./time.js";
 export { uuidv7 } from "./ids.js";
 export { cosine } from "./vector.js";
 export { SCHEMA_VERSION, SchemaVersionError } from "./storage/migrations.js";
-export type { EventProvider, SqliteEventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
+export type { EventRefResolver } from "./storage/event-refs.js";
+export type { EventProvider, SqliteEventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore, AliasStore };
 /** The default (SQLite-backed) event store. Alias kept for callers that imported it under this name. */
 export type EventStore = SqliteEventStore;
 
@@ -34,16 +37,24 @@ export class HindsightDB<E extends EventProvider = SqliteEventStore> {
   readonly decisions: DecisionStore;
   readonly outcomes: OutcomeStore;
   readonly history: HistoryStore;
+  /** External entity id → timeline label mappings, applied when an event's entities select its timeline. */
+  readonly aliases: AliasStore;
   private readonly conn: Connection;
 
   constructor(options: DatabaseOptions<E> = {}) {
     this.conn = new Connection(options);
     // Without an external provider, events live in the same file as the context.
-    this.events = (options.events ?? new SqliteEventStore(this.conn)) as E;
-    this.timeline = new TimelineStore(this.conn, this.events);
-    this.decisions = new DecisionStore(this.conn);
-    this.outcomes = new OutcomeStore(this.conn);
-    this.history = new HistoryStore(this.conn, this.events, this.timeline, this.decisions, this.outcomes);
+    const external = options.events;
+    this.events = (external ?? new SqliteEventStore(this.conn)) as E;
+    // Decisions and outcomes reference event stubs rather than the events
+    // table. The SQLite store fills the stubs through triggers; an external
+    // provider is asked for the events it owns the first time they are referenced.
+    const refs = new EventRefStore(this.conn, external ? (ids) => external.getMany(ids) : undefined);
+    this.aliases = new AliasStore(this.conn);
+    this.timeline = new TimelineStore(this.conn, this.events, this.aliases);
+    this.decisions = new DecisionStore(this.conn, refs);
+    this.outcomes = new OutcomeStore(this.conn, refs);
+    this.history = new HistoryStore(this.conn, this.events, this.timeline, this.decisions, this.outcomes, this.aliases);
   }
 
   /** Schema version of the open file (equals SCHEMA_VERSION after open). */

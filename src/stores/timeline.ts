@@ -14,6 +14,7 @@ import type {
 } from "../types.js";
 import { assertEntity, assertLimit } from "../validate.js";
 import type { EventProvider } from "../events/provider.js";
+import type { AliasStore } from "./aliases.js";
 
 interface TimelineRow {
   id: number;
@@ -61,11 +62,13 @@ export interface TimelineWindow {
 export class TimelineStore {
   private readonly conn: Connection;
   private readonly events: EventProvider;
+  private readonly aliases: AliasStore;
   private readonly prepared;
 
-  constructor(conn: Connection, events: EventProvider) {
+  constructor(conn: Connection, events: EventProvider, aliases: AliasStore) {
     this.conn = conn;
     this.events = events;
+    this.aliases = aliases;
     this.prepared = {
       insert: conn.db.prepare(
         `INSERT INTO timeline (timestamp, observed_at, entity, namespace, data)
@@ -133,12 +136,16 @@ export class TimelineStore {
     };
   }
 
-  /** All streams in a window around an event, grouped by namespace. */
+  /**
+   * All streams in a window around an event, grouped by namespace. The
+   * event's entities select the streams (expanded through `db.aliases`)
+   * unless `entities` overrides them.
+   */
   async around(query: TimelineAroundQuery): Promise<TimelineStreams> {
     const event = await this.events.get(query.eventId);
     if (!event) throw new Error(`Event not found: ${query.eventId}`);
     const { from, to } = windowAround(event.timestamp, query.before, query.after);
-    const entities = query.entities !== undefined ? asArray(query.entities) : event.entities;
+    const entities = query.entities !== undefined ? asArray(query.entities) : this.aliases.expand(event.entities);
     return groupByNamespace(
       this.fetchWindow({
         from,
