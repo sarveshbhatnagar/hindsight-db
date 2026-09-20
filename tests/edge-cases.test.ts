@@ -817,13 +817,40 @@ describe("lifecycle: deletes, ids, batches and transactions", () => {
     expect((await db.events.get("a"))?.id).toBe("a");
   });
 
-  it("transaction(): an async callback is rejected and its synchronous writes are rolled back", async () => {
-    expect(() =>
+  it("transaction(): an async callback keeps the transaction open across awaits and commits when it resolves", async () => {
+    const n = await db.transaction(async () => {
+      const ev = await db.events.insert({ id: "a", timestamp: T0, type: "x" });
+      const d = await db.decisions.insert({ eventId: ev.id, timestamp: T0, action: 1 });
+      await db.outcomes.insert({ eventId: ev.id, decisionId: d.id, horizon: "1d", result: 1 });
+      return 3;
+    });
+    expect(n).toBe(3);
+    expect((await db.history.get({ eventId: "a", after: "2d" })).outcomes).toHaveLength(1);
+  });
+
+  it("transaction(): an async callback that rejects rolls back everything it awaited", async () => {
+    await expect(
       db.transaction(async () => {
-        await db.events.insert({ id: "a", timestamp: T0, type: "x" });
+        await db.events.insert({ id: "b", timestamp: T0, type: "x" });
+        await db.timeline.insert({ timestamp: T0, entity: "B", namespace: "m", data: 1 });
+        throw new Error("abort");
       }),
-    ).toThrow(/cannot return a promise/);
-    expect(await db.events.get("a")).toBeUndefined();
+    ).rejects.toThrow("abort");
+    expect(await db.events.get("b")).toBeUndefined();
+    expect((await db.timeline.range({ from: T0, to: T0 })).items).toEqual([]);
+  });
+
+  it("transaction(): store calls from another context wait for an open async transaction", async () => {
+    let released = false;
+    const tx = db.transaction(async () => {
+      await db.events.insert({ id: "c", timestamp: T0, type: "x" });
+      await new Promise((r) => setTimeout(r, 20));
+      released = true;
+    });
+    // Issued while the transaction is open, from outside it: runs after the commit.
+    const outside = db.events.get("c").then((ev) => ({ ev, released }));
+    await tx;
+    expect(await outside).toEqual({ ev: expect.objectContaining({ id: "c" }), released: true });
   });
 
   // Store methods are async, so a failure inside one surfaces as a rejected
@@ -860,8 +887,8 @@ describe("lifecycle: deletes, ids, batches and transactions", () => {
     expect((await db.timeline.range({ from: T0, to: T0 })).items).toEqual([]);
   });
 
-  it("a failing store call in a promise-returning callback surfaces its real error, not an unhandled rejection", async () => {
-    expect(() => db.transaction(() => db.events.insert({ id: "x", timestamp: T0, type: "" }))).toThrow(
+  it("a failing store call in a promise-returning callback rejects the transaction with its real error", async () => {
+    await expect(db.transaction(() => db.events.insert({ id: "x", timestamp: T0, type: "" }))).rejects.toThrow(
       /type is required/,
     );
     expect(await db.events.get("x")).toBeUndefined();

@@ -1,4 +1,5 @@
 import type { EventProvider } from "./events/provider.js";
+import type { PgPool } from "./storage/postgres.js";
 import type { DurationInput, TimestampInput } from "./time.js";
 import type { Embedding } from "./vector.js";
 
@@ -332,17 +333,50 @@ export interface HistoryManyQuery extends Omit<HistoryQuery, "eventId"> {
   eventIds: string[];
 }
 
-export interface DatabaseOptions<E extends EventProvider = EventProvider> {
-  /** Path to the SQLite file. Defaults to ":memory:". */
-  path?: string;
-  /**
-   * External event source. When given, `db.events` is this provider and the
-   * SQLite file holds only the context (timeline, decisions, outcomes).
-   * Omit to store events in the file too (the default `SqliteEventStore`).
-   */
-  events?: E;
+interface CommonOptions {
   /** Generate ids for records inserted without one. Defaults to time-ordered UUID v7. */
   idGenerator?: () => string;
+}
+
+/** The default: everything in one SQLite file (or in memory). */
+export interface SqliteDatabaseOptions extends CommonOptions {
+  storage?: "sqlite";
+  /** Path to the SQLite file. Defaults to ":memory:". */
+  path?: string;
   /** SQLite page cache in MiB (default: SQLite's ~2 MiB). Larger values speed up scans and paging at the cost of RAM. */
   cacheSizeMb?: number;
 }
+
+/**
+ * The context (timeline, decisions, outcomes, aliases) in Postgres; events
+ * must come from an external `EventProvider`. Needs the optional peer
+ * dependency `pg`. The schema is created on first use — `await db.ready()`
+ * to surface connection or migration errors early.
+ */
+export interface PostgresDatabaseOptions extends CommonOptions {
+  storage: "postgres";
+  /** Connection string for a pool the database creates and owns (closed by `db.close()`). Either this or `pool`. */
+  connectionString?: string;
+  /** An existing `pg.Pool` to share, e.g. insights-db's. Not closed by `db.close()`. */
+  pool?: PgPool;
+  /**
+   * Schema for the hindsight tables, created if missing and put first on the
+   * connections' search path. Only with `connectionString`; a shared pool's
+   * search path is whoever created it's to set.
+   */
+  schema?: string;
+}
+
+export type DatabaseOptions<E extends EventProvider = EventProvider> =
+  | (SqliteDatabaseOptions & {
+      /**
+       * External event source. When given, `db.events` is this provider and the
+       * SQLite file holds only the context (timeline, decisions, outcomes).
+       * Omit to store events in the file too (the default `SqliteEventStore`).
+       */
+      events?: E;
+    })
+  | (PostgresDatabaseOptions & {
+      /** External event source; required with Postgres, which stores only the context. */
+      events: E;
+    });

@@ -9,6 +9,9 @@ import { openDatabase, InsightsEventProvider, type HindsightDB } from "../src/in
  *     -p 5433:5432 pgvector/pgvector:pg16
  *   DATABASE_URL=postgres://postgres:postgres@localhost:5433/insights_db npm test
  *
+ * Runs twice: with the context in SQLite, and with it in the same Postgres
+ * schema as insights (sharing its pool) — one database for everything.
+ *
  * The insights schema is created in a schema of its own (`hindsight_it`) and
  * seeded through SQL — the shape ingest would leave behind, without the LLM:
  * a bank failure first reported on 9/11 with two claims, one of which a
@@ -28,7 +31,7 @@ const vec = (...axes: number[]): string => {
 
 type Insights = import("insights-db").Insights;
 
-describe.skipIf(!url)("InsightsEventProvider against insights-db", () => {
+describe.skipIf(!url).each(["sqlite", "postgres"] as const)("InsightsEventProvider against insights-db (context in %s)", (storage) => {
   let insights: Insights;
   let db: HindsightDB<InsightsEventProvider>;
   let ids: { bank: string; sale: string; meridian: string; fdic: string; doc2: string; c1: string; c2: string; c3: string; c4: string };
@@ -44,11 +47,15 @@ describe.skipIf(!url)("InsightsEventProvider against insights-db", () => {
     ids = await seed(admin);
     await admin.end();
     insights = openInsights({ connectionString: base.toString() });
-    db = openDatabase({ events: new InsightsEventProvider(insights) });
+    const provider = new InsightsEventProvider(insights);
+    // The context either in a SQLite file next to insights, or in insights' own
+    // Postgres database and schema, sharing its pool.
+    db = storage === "postgres" ? openDatabase({ storage: "postgres", pool: insights.pool, events: provider }) : openDatabase({ events: provider });
+    await db.ready();
   });
 
   afterAll(async () => {
-    db?.close();
+    await db?.close();
     await insights?.end();
   });
 

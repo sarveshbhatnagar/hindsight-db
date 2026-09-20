@@ -1,5 +1,5 @@
-import type { Connection } from "../storage/sqlite.js";
-import { asArray, chunks, decodeCursor, encodeCursor, inList, prefixUpperBound } from "../storage/sqlite.js";
+import type { SqliteStorage } from "../storage/sqlite.js";
+import { asArray, chunks, decodeCursor, encodeCursor, inList, prefixUpperBound } from "../storage/storage.js";
 import type { EventProvider, GetManyOptions } from "./provider.js";
 import { toMillis } from "../time.js";
 import type {
@@ -138,10 +138,10 @@ function ranksBefore(a: { id: string; score: number }, b: { id: string; score: n
 
 /** The default event source: events stored in the same SQLite file as the context. */
 export class SqliteEventStore implements EventProvider {
-  private readonly conn: Connection;
+  private readonly conn: SqliteStorage;
   private readonly prepared;
 
-  constructor(conn: Connection) {
+  constructor(conn: SqliteStorage) {
     this.conn = conn;
     this.prepared = {
       insert: this.conn.db.prepare(
@@ -168,7 +168,7 @@ export class SqliteEventStore implements EventProvider {
   /** Insert many events in a single transaction. */
   async insertMany(inputs: EventInput[]): Promise<Event[]> {
     // Validation runs inside the transaction so an enclosing db.transaction() sees failures too.
-    const rows = this.conn.transaction(() => {
+    const rows = await this.conn.transaction(() => {
       const normalized = inputs.map((input) => this.normalize(input));
       for (const { row, entities } of normalized) {
         this.prepared.insert.run(row);
@@ -215,9 +215,14 @@ export class SqliteEventStore implements EventProvider {
     };
   }
 
+  // Reads and writes go through `conn.guard`: synchronous, unless another
+  // context's transaction is open on the connection, in which case they wait for it.
+
   async get(id: string, opts: { includeEmbedding?: boolean } = {}): Promise<Event | undefined> {
-    const row = this.prepared.get.get(id) as EventRow | undefined;
-    return row ? rowToEvent(row, opts.includeEmbedding ?? false) : undefined;
+    return this.conn.guard(() => {
+      const row = this.prepared.get.get(id) as EventRow | undefined;
+      return row ? rowToEvent(row, opts.includeEmbedding ?? false) : undefined;
+    });
   }
 
   /**
@@ -227,15 +232,17 @@ export class SqliteEventStore implements EventProvider {
    */
   async getMany(ids: string[], opts: GetManyOptions = {}): Promise<Event[]> {
     if (ids.length === 0) return [];
-    const byId = new Map<string, Event>();
-    for (const chunk of chunks(ids)) {
-      const l = inList("e.id", chunk);
-      const rows = this.conn.db.prepare(`${SELECT_BARE} WHERE ${l.sql}`).all(...l.params) as EventRow[];
-      for (const r of rows) byId.set(r.id, rowToEvent(r, opts.includeEmbedding ?? false));
-    }
-    const events = ids.map((id) => byId.get(id)).filter((e): e is Event => e !== undefined);
-    this.attachEntities(events);
-    return events;
+    return this.conn.guard(() => {
+      const byId = new Map<string, Event>();
+      for (const chunk of chunks(ids)) {
+        const l = inList("e.id", chunk);
+        const rows = this.conn.db.prepare(`${SELECT_BARE} WHERE ${l.sql}`).all(...l.params) as EventRow[];
+        for (const r of rows) byId.set(r.id, rowToEvent(r, opts.includeEmbedding ?? false));
+      }
+      const events = ids.map((id) => byId.get(id)).filter((e): e is Event => e !== undefined);
+      this.attachEntities(events);
+      return events;
+    });
   }
 
   /** Fill `entities` for many events with one query per chunk instead of one subquery per row. */
@@ -252,7 +259,7 @@ export class SqliteEventStore implements EventProvider {
   }
 
   async delete(id: string): Promise<boolean> {
-    return this.prepared.delete.run(id).changes > 0;
+    return this.conn.guard(() => this.prepared.delete.run(id).changes > 0);
   }
 
   /**
@@ -313,17 +320,19 @@ export class SqliteEventStore implements EventProvider {
     const cmp = order === "asc" ? ">" : "<";
     const cursorSql = cursor ? ` AND (e.timestamp ${cmp} ? OR (e.timestamp = ? AND e.id ${cmp} ?))` : "";
     const cursorParams = cursor ? [cursor.t, cursor.t, cursor.id] : [];
-    const rows = this.conn.db
-      .prepare(`${SELECT_BARE} WHERE ${where}${cursorSql} ORDER BY e.timestamp ${order}, e.id ${order} LIMIT ?`)
-      .all(...params, ...cursorParams, limit + 1) as EventRow[];
-    const hasMore = rows.length > limit;
-    const items = rows.slice(0, limit).map((r) => rowToEvent(r, false));
-    this.attachEntities(items);
-    const last = items[items.length - 1];
-    return {
-      items,
-      ...(hasMore && last ? { nextCursor: encodeCursor({ t: last.timestamp, id: last.id }) } : {}),
-    };
+    return this.conn.guard(() => {
+      const rows = this.conn.db
+        .prepare(`${SELECT_BARE} WHERE ${where}${cursorSql} ORDER BY e.timestamp ${order}, e.id ${order} LIMIT ?`)
+        .all(...params, ...cursorParams, limit + 1) as EventRow[];
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map((r) => rowToEvent(r, false));
+      this.attachEntities(items);
+      const last = items[items.length - 1];
+      return {
+        items,
+        ...(hasMore && last ? { nextCursor: encodeCursor({ t: last.timestamp, id: last.id }) } : {}),
+      };
+    });
   }
 
   /**
@@ -354,24 +363,30 @@ export class SqliteEventStore implements EventProvider {
       params.push(query.prefix, prefixUpperBound(query.prefix));
     }
     const where = clauses.length ? clauses.join(" AND ") : "1";
-    return this.conn.db
-      .prepare(
-        `SELECT ee.entity_id AS entity, count(*) AS count, min(e.timestamp) AS firstSeen, max(e.timestamp) AS lastSeen
-         FROM event_entities ee JOIN events e ON e.id = ee.event_id
-         WHERE ${where}
-         GROUP BY ee.entity_id ORDER BY count DESC, entity ASC LIMIT ?`,
-      )
-      .all(...params, limit) as EntityStats[];
+    return this.conn.guard(
+      () =>
+        this.conn.db
+          .prepare(
+            `SELECT ee.entity_id AS entity, count(*) AS count, min(e.timestamp) AS firstSeen, max(e.timestamp) AS lastSeen
+             FROM event_entities ee JOIN events e ON e.id = ee.event_id
+             WHERE ${where}
+             GROUP BY ee.entity_id ORDER BY count DESC, entity ASC LIMIT ?`,
+          )
+          .all(...params, limit) as EntityStats[],
+    );
   }
 
   /** Event types in use, with counts and event-time span, most frequent first. */
   async types(): Promise<TypeStats[]> {
-    return this.conn.db
-      .prepare(
-        `SELECT type, count(*) AS count, min(timestamp) AS firstSeen, max(timestamp) AS lastSeen
-         FROM events GROUP BY type ORDER BY count DESC, type ASC`,
-      )
-      .all() as TypeStats[];
+    return this.conn.guard(
+      () =>
+        this.conn.db
+          .prepare(
+            `SELECT type, count(*) AS count, min(timestamp) AS firstSeen, max(timestamp) AS lastSeen
+             FROM events GROUP BY type ORDER BY count DESC, type ASC`,
+          )
+          .all() as TypeStats[],
+    );
   }
 
   /**
@@ -403,28 +418,31 @@ export class SqliteEventStore implements EventProvider {
     // When other filters are present, `+e.dim` stops the planner from choosing the
     // dim index (which would scan every row of that dimension) over the selective one.
     const dimTerm = where === "1" ? "e.dim = ?" : "+e.dim = ?";
-    const rows = this.conn.db
-      .prepare(`SELECT e.id, e.embedding, e.norm FROM events e WHERE e.embedding IS NOT NULL AND ${dimTerm} AND ${where}`)
-      .iterate(vector.length, ...params) as IterableIterator<Pick<EventRow, "id" | "embedding" | "norm">>;
+    const top = await this.conn.guard(() => {
+      const rows = this.conn.db
+        .prepare(`SELECT e.id, e.embedding, e.norm FROM events e WHERE e.embedding IS NOT NULL AND ${dimTerm} AND ${where}`)
+        .iterate(vector.length, ...params) as IterableIterator<Pick<EventRow, "id" | "embedding" | "norm">>;
 
-    // Bounded top-k: keep a descending-sorted array of at most `limit` entries.
-    const top: { id: string; score: number }[] = [];
-    try {
-      for (const r of rows) {
-        const score = cosine(vector, decodeEmbedding(r.embedding!), qnorm, r.norm ?? undefined);
-        if (score < minScore) continue;
-        if (after && !(score < after.s || (score === after.s && r.id > after.id))) continue;
-        const hit = { id: r.id, score };
-        if (top.length === limit + 1 && !ranksBefore(hit, top[top.length - 1]!)) continue;
-        let i = top.length;
-        while (i > 0 && ranksBefore(hit, top[i - 1]!)) i--;
-        top.splice(i, 0, hit);
-        if (top.length > limit + 1) top.pop();
+      // Bounded top-k: keep a descending-sorted array of at most `limit` entries.
+      const top: { id: string; score: number }[] = [];
+      try {
+        for (const r of rows) {
+          const score = cosine(vector, decodeEmbedding(r.embedding!), qnorm, r.norm ?? undefined);
+          if (score < minScore) continue;
+          if (after && !(score < after.s || (score === after.s && r.id > after.id))) continue;
+          const hit = { id: r.id, score };
+          if (top.length === limit + 1 && !ranksBefore(hit, top[top.length - 1]!)) continue;
+          let i = top.length;
+          while (i > 0 && ranksBefore(hit, top[i - 1]!)) i--;
+          top.splice(i, 0, hit);
+          if (top.length > limit + 1) top.pop();
+        }
+      } finally {
+        // Never leave the statement open (it would mark the connection busy).
+        rows.return?.();
       }
-    } finally {
-      // Never leave the statement open (it would mark the connection busy).
-      rows.return?.();
-    }
+      return top;
+    });
 
     // We kept limit + 1 to learn whether another page exists.
     const hasMore = top.length > limit;

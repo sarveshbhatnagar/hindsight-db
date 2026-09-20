@@ -27,8 +27,8 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  integration:
-    name: insights-db integration (pgvector)
+  postgres:
+    name: Postgres backend + insights-db integration (pgvector)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -44,6 +44,9 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npx vitest run tests/insights-integration.test.ts
+      # With DATABASE_URL set, vitest adds the "postgres" project (the store
+      # tests against Postgres) and un-skips tests/postgres.test.ts and the
+      # insights integration test.
+      - run: npm test
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/insights_db

@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HindsightDB, openDatabase } from "../src/index.js";
-import { MAX_LIST } from "../src/storage/sqlite.js";
+import { openTestDatabase } from "./helpers/backend.js";
+import { MAX_LIST } from "../src/storage/storage.js";
 
 const T0 = Date.UTC(2024, 0, 10);
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
 let db: HindsightDB;
-beforeEach(() => {
-  db = openDatabase();
+beforeEach(async () => {
+  db = await openTestDatabase();
 });
 afterEach(() => db.close());
 

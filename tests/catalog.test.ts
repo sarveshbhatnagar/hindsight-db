@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HindsightDB, openDatabase } from "../src/index.js";
+import { HindsightDB } from "../src/index.js";
+import { openTestDatabase } from "./helpers/backend.js";
 
 const T0 = Date.UTC(2024, 0, 1);
 const DAY = 86_400_000;
 
 let db: HindsightDB;
 beforeEach(async () => {
-  db = openDatabase();
+  db = await openTestDatabase();
   await db.events.insertMany([
     { id: "e1", timestamp: T0, type: "earnings", entities: ["AAPL", "sector:tech"] },
     { id: "e2", timestamp: T0 + DAY, type: "earnings", entities: ["NVDA", "sector:tech", "theme:ai"] },
@@ -111,12 +112,12 @@ describe("timeline.entities / timeline.namespaces", () => {
   });
 
   it("is empty on an empty store", async () => {
-    const fresh = openDatabase();
-    expect(await fresh.events.entities()).toEqual([]);
-    expect(await fresh.events.types()).toEqual([]);
-    expect(await fresh.timeline.entities()).toEqual([]);
-    expect(await fresh.timeline.namespaces()).toEqual([]);
-    fresh.close();
+    await db.close();
+    db = await openTestDatabase(); // no seed this time
+    expect(await db.events.entities()).toEqual([]);
+    expect(await db.events.types()).toEqual([]);
+    expect(await db.timeline.entities()).toEqual([]);
+    expect(await db.timeline.namespaces()).toEqual([]);
   });
 });
 

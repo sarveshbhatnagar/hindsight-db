@@ -18,6 +18,7 @@ Applications use it to find similar historical events, reconstruct the timeline 
 
 ```sh
 npm install        # better-sqlite3 (embedded storage)
+npm install pg     # optional: Postgres backend for the context stores
 npm test           # vitest
 npm run build      # emits dist/
 ```
@@ -188,6 +189,39 @@ A provider whose events keep growing after they are first observed (new facts ge
 | --- | --- |
 | `db.gc()` | Drop the decisions and outcomes of events the provider no longer has (it may delete or merge them; nothing cascades across databases). Returns `{ removedEvents, removedDecisions, removedOutcomes }`. A no-op with the SQLite event store. |
 
+### Storage backends
+
+The context — timeline, decisions, outcomes, aliases — lives in a **SQLite** file by default: zero configuration, embedded, events included. With an external event source it can live in **Postgres** instead, so an application whose events are already in Postgres (insights-db, say) keeps everything in one database:
+
+```ts
+import { openDatabase } from "hindsight-db";
+
+const db = openDatabase({
+  storage: "postgres",
+  connectionString: process.env.DATABASE_URL, // or: pool (an existing pg.Pool, e.g. insights.pool)
+  schema: "hindsight",                          // optional; only with connectionString
+  events: provider,                             // required: Postgres stores only the context
+});
+await db.ready(); // optional: connects and creates/migrates the schema now rather than on first use
+```
+
+| Option | |
+| --- | --- |
+| `connectionString` | A pool the database creates and owns; `db.close()` ends it. |
+| `pool` | A `pg.Pool` to share (its tables land wherever that pool's `search_path` points). Not ended by `db.close()`. |
+| `schema` | Postgres schema for the hindsight tables, created if missing and put first on the connections' `search_path`. With a shared `pool`, set its search path yourself. |
+
+`pg` is an optional peer dependency (`npm install pg`), imported on first use; a SQLite-only install never loads it. The tables are the same as the SQLite ones (`event_refs`, `timeline`, `decisions`, `outcomes`, `entity_aliases`; JSON columns as `text`, timestamps as `bigint`), versioned in a `hindsight_schema` table the way SQLite files are in `PRAGMA user_version` (`db.schemaVersion`, `POSTGRES_SCHEMA_VERSION`); opening applies pending migrations under an advisory lock, so several processes can start at once. `db.storage` tells you which backend a handle uses.
+
+What changes with Postgres:
+
+- **Everything is asynchronous.** On SQLite a store method has executed its SQL by the time it hands back its promise; on Postgres nothing happens until you await. `db.transaction(fn)` therefore takes an async callback — `await db.transaction(async () => { await db.timeline.insert(…); await db.decisions.insert(…); })` — which works identically on both backends, and always returns a promise on Postgres. See *Transactions* under Implementation notes.
+- **Round trips cost.** `history.getMany` fetches all its windows in one query, and all inserts are multi-row statements, so batch where you can: on a local Postgres `getMany` is ~3× faster per event than a loop of `history.get`, and `timeline.range` paging is bounded by moving 1000 rows over the wire (~7 ms/page) rather than by the index scan (~1.7 ms).
+- **`bulkLoad`** drops the secondary indexes for every client of that schema for the duration, not just yours.
+- **Events** stay wherever the provider keeps them; a Postgres-backed *event* store (pgvector `similar`) is not part of this — use `InsightsEventProvider`, your own `EventProvider`, or a separate SQLite file's `db.events` as the source.
+
+The test suite runs against both backends: `DATABASE_URL=postgres://… npm test` adds a `postgres` project that runs the store tests a second time against Postgres (in schemas of its own, `hindsight_test_*`), plus `tests/postgres.test.ts` for backend-specific behaviour.
+
 ### Using insights-db as the event source
 
 [insights-db](https://github.com/sarveshbhatnagar/insights-db) ingests documents into deduplicated real-world events with their facts, on Postgres + pgvector. `InsightsEventProvider` wraps its read API so hindsight-db can keep the context around those events. insights-db is an optional peer dependency (`npm install insights-db`); nothing of it is loaded unless you use the adapter.
@@ -226,7 +260,9 @@ How insights records map to hindsight events:
 
 `similar` ranks by insights' **pattern** embedding (written once per event, so a backtest sees the same neighbours at any later date); pass `{ vector: "content" }` to the constructor to rank by the content embedding, which follows the claims as they merge. Filters: `type`, `entities` (any-of), `from`/`to` (rounded to whole days), `asOf`, `excludeIds`. `entitiesAll` is accepted for a single id only, `metadata` filters and `similar`'s `cursor` throw — insights' read API has no equivalent, and a silently wider result would be worse than an error. `getMany(ids, { asOf })` returns each event as insights knew it then, which is what `history` uses. `includeEmbedding` is ignored (insights does not hand out vectors).
 
-The integration test in `tests/insights-integration.test.ts` runs when `DATABASE_URL` points at a Postgres with pgvector (see the container in insights-db's README); it creates its own `hindsight_it` schema there.
+To keep the context in the same Postgres as insights, share its pool: `openDatabase({ storage: "postgres", pool: insights.pool, events: new InsightsEventProvider(insights) })` puts the hindsight tables in insights' schema (see *Storage backends*).
+
+The integration test in `tests/insights-integration.test.ts` runs when `DATABASE_URL` points at a Postgres with pgvector (see the container in insights-db's README); it creates its own `hindsight_it` schema there and runs once with the context in SQLite and once with it in that same schema.
 
 ### `db.bulkLoad(fn)`
 
@@ -252,15 +288,15 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 
 ## Implementation notes
 
-- **Storage**: a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events). All stores share one connection.
-- **Event stubs**: decisions and outcomes do not reference the `events` table directly but `event_refs`, a local `(id, timestamp, observed_at)` stub per event. In the default setup triggers keep it in sync with `events` (inserts, timestamp updates, deletes — the cascade from an event delete flows through it), so it is invisible. It exists so events can live in another database: with `openDatabase({ events: provider })`, `decisions.insert`/`outcomes.insert` fetch the stubs for ids they have not seen from `provider.getMany` *before* opening their write transaction, so `outcomes.insert` still resolves its default timestamp locally and synchronously. Ids the provider does not know fail as unknown events. Once an event's stub exists, later writes for it are synchronous again and may run inside `db.transaction()`. Nothing tells the file when the provider drops an event; `db.gc()` asks the provider about every stub, 5000 ids at a time, and deletes the ones it no longer knows (cascading to their decisions and outcomes).
+- **Storage**: by default a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events), all stores sharing one connection; or Postgres for the context tables (see *Storage backends*). The context stores are written once against a small `Storage` interface (`src/storage/storage.ts`): a store method describes its work as a generator that yields SQL effects (`all`, `run`, `tx`) and gets their results back, and the backend interprets it — `SqliteStorage` synchronously in one go, `PostgresStorage` with an await per statement. SQL is written in the common dialect (`?` placeholders, rewritten to `$n` for Postgres; `ON CONFLICT`; `RETURNING`; multi-row `VALUES`), with the one divergence (`group_concat` vs `string_agg`) behind `Storage.dialect`. The SQLite event store is not behind this interface: it uses better-sqlite3 directly (triggers, blob embeddings, the `similar()` scan).
+- **Event stubs**: decisions and outcomes do not reference the `events` table directly but `event_refs`, a local `(id, timestamp, observed_at)` stub per event. In the default setup triggers keep it in sync with `events` (inserts, timestamp updates, deletes — the cascade from an event delete flows through it), so it is invisible. It exists so events can live in another database: with `openDatabase({ events: provider })`, `decisions.insert`/`outcomes.insert` fetch the stubs for ids they have not seen from `provider.getMany` *before* opening their write transaction, so `outcomes.insert` still resolves its default timestamp locally (and, on SQLite, synchronously). Ids the provider does not know fail as unknown events. Once an event's stub exists, later writes for it are synchronous again on SQLite and may run inside a synchronous `db.transaction()`. Nothing tells the file when the provider drops an event; `db.gc()` asks the provider about every stub, 5000 ids at a time, and deletes the ones it no longer knows (cascading to their decisions and outcomes).
 - **Point-in-time content**: `history.getMany` first fetches the events as they stand (to resolve each window), then — for a provider with `pointInTime` — once more per distinct `contextUntil` with `asOf`, so an explicit cutoff costs one extra call for the whole batch and the default (each event's own `observedAt`) one per event, issued concurrently. An event observed only after its cutoff is returned as it stands.
-- **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one. `migrate()` runs with foreign keys off (a table rebuild's `DROP` would otherwise cascade) and refuses to commit a migration that leaves a foreign-key violation. Versions so far: **v1** initial schema; **v2** `timeline (entity, timestamp)` index; **v3** `event_refs` (decisions/outcomes rebuilt to reference it, populated from existing events) and `entity_aliases`. Opening a v2 file upgrades it in place, keeping all decision and outcome rows.
+- **Schema migrations**: the SQLite schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`; the Postgres schema is its own list in `src/storage/postgres.ts` (context tables only, versioned in `hindsight_schema`, currently **v1**), applied under an advisory lock so concurrent openers serialize. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one. `migrate()` runs with foreign keys off (a table rebuild's `DROP` would otherwise cascade) and refuses to commit a migration that leaves a foreign-key violation. Versions so far: **v1** initial schema; **v2** `timeline (entity, timestamp)` index; **v3** `event_refs` (decisions/outcomes rebuilt to reference it, populated from existing events) and `entity_aliases`. Opening a v2 file upgrades it in place, keeping all decision and outcome rows.
 - **Vector search**: embeddings are stored as Float32 blobs (native byte order) with a precomputed L2 norm; non-finite components are rejected at insert and query time. `similar()` narrows candidates with SQL filters, then scores cosine similarity in-process with a bounded top-k. This is exact, not approximate — fine up to roughly 10⁵ events per query; swap in an ANN index behind the same interface when that stops being true.
-- **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout, and the event side is behind the `EventProvider` interface, so a networked event store (e.g. Postgres + pgvector) can be dropped in via `openDatabase({ events })` without changing callers.
+- **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, then one read transaction for everything local: alias expansion, every timeline window, decisions, outcomes. On Postgres the windows of one shape (all with entities or none, etc.) go out as a single `unnest … JOIN LATERAL` query, one index scan per window server-side, instead of one round trip each. The API is promise-based throughout, and the event side is behind the `EventProvider` interface, so a networked event store (e.g. Postgres + pgvector) can be dropped in via `openDatabase({ events })` without changing callers.
 - **Pagination**: `events.list` and `timeline.range` use opaque keyset cursors on `(timestamp, id)`.
 - **List sizes**: id lookups (`events.getMany`, `history.getMany`) are chunked internally, so any number of ids is fine. Filter lists (`entities`, `type`, `excludeIds`) are capped at 5000 values per query and fail with a clear error beyond that.
-- **Transactions**: `insertMany` on every store is atomic. `db.transaction(fn)` wraps several writes all-or-nothing: `fn` must be synchronous (store methods execute their SQL before their first `await`, so calling several inside `fn` works), and if any of them fails, the outer transaction rolls back and rethrows that error.
+- **Transactions**: `insertMany` on every store is atomic. `db.transaction(fn)` wraps several writes all-or-nothing, and if any store call inside fails — even one whose rejection you swallowed — the whole transaction rolls back and rethrows that error. `fn` may be **async**: store calls made in its async context (via `AsyncLocalStorage`) join the transaction, nested `db.transaction` calls become savepoints, and it commits when the returned promise resolves. Await store calls one after another inside it; un-awaited ones are still drained before the commit, but interleaving two nested transactions is not supported. On SQLite a **synchronous** `fn` is the fast path: store methods run their SQL before their first `await`, so `db.transaction(() => { void db.timeline.insertMany(a); void db.decisions.insertMany(b); })` commits before it returns. While an async transaction is open on SQLite, store calls from other async contexts wait for it to end (one connection cannot interleave two transactions) — so never `await` something inside `fn` that itself needs the database from outside `fn`'s context. On Postgres a transaction pins one pool client and is always asynchronous; other connections do not see its writes until commit, as usual.
 - **Validation**: ids, entities and namespaces must be non-empty strings (entities may not contain U+001F); `metadata` must be a plain object shallow enough for SQLite's JSON parser; embeddings must be non-empty and finite; `limit` must be a positive integer; `horizon` must be non-negative. Metadata filters are type-strict (`1`, `"1"` and `true` are distinct).
 
 ## Performance
@@ -291,6 +327,20 @@ A filter on an entity that nearly every event carries (e.g. a catch-all tag) is 
 
 Ingest: `bulkLoad` measured 1.6× on 600k in-memory timeline rows (more on large on-disk tables, where index maintenance dominates); UUID v7 ids 1.25× on event ingest vs random UUIDs. Pass `cacheSizeMb` to `openDatabase` for a larger page cache (≈20% on paging).
 
+### Postgres
+
+`STORAGE=postgres DATABASE_URL=postgres://… node bench/scale.ts` runs the same bench with the context in Postgres (events stay in the SQLite file). Against a Postgres 16 in Docker on the same M2 Pro, at 20k events / 200k timeline points (`N_EVENTS=20000 N_ENTITIES=100 N_DAYS=500`):
+
+| Operation | SQLite | Postgres (context) |
+| --- | --- | --- |
+| `history.getMany` ×100 (≈420 points/event) | ~0.5 ms/event | ~0.8 ms/event |
+| loop of `history.get` ×100 | ~0.57 ms/event | ~2.3 ms/event |
+| `timeline.range` paging, 1000 points/page | ~3 ms/page | ~7 ms/page (index scan 1.7 ms; the rest is the wire) |
+| Ingest: timeline (batches of 10k) | ~170k rows/s | ~105k rows/s |
+| Ingest: decisions / outcomes (batches of 1k / 2k) | ~270k / ~180k rows/s | ~35k / ~38k rows/s |
+
+Every timeline index in Postgres ends in `(timestamp, id)` — the pair reads order and page by — because, unlike SQLite's rowid, the id is not implicitly part of an index key there; the paging cursor is a row-value comparison for the same reason. Where the numbers differ it is round trips and bytes on the wire, not the plan: batch through `insertMany`/`getMany`, and prefer a Unix socket or a nearby server.
+
 ## Layout
 
 ```
@@ -300,14 +350,17 @@ src/
   time.ts             duration + timestamp parsing, addDuration
   ids.ts              UUID v7 generator
   vector.ts           embedding encoding, cosine
-  storage/sqlite.ts   connection + SQL helpers
-  storage/migrations.ts  versioned schema (append-only)
+  storage/storage.ts  Storage interface, generator ops, shared SQL helpers
+  storage/sqlite.ts   SqliteStorage (synchronous interpreter, transactions)
+  storage/postgres.ts PostgresStorage (async interpreter over pg) + its schema
+  storage/migrations.ts  versioned SQLite schema (append-only)
   storage/event-refs.ts  local event stubs that decisions/outcomes reference
   events/provider.ts  EventProvider interface (read side of an event source)
   events/sqlite.ts    SqliteEventStore, the default provider (adds writes)
   events/insights.ts  InsightsEventProvider, adapter over insights-db's read API
   stores/             timeline, decisions, outcomes, history, aliases
-tests/                vitest, one file per store + end-to-end flow
+tests/                vitest, one file per store + end-to-end flow; store tests run on both backends
+tests/helpers/backend.ts  picks the backend per vitest project (see vitest.config.ts)
 ```
 
 ## Releasing

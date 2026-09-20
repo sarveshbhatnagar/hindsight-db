@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HindsightDB, openDatabase } from "../src/index.js";
+import { HindsightDB } from "../src/index.js";
+import { openTestDatabase } from "./helpers/backend.js";
 
 const T0 = Date.UTC(2024, 0, 1);
 const DAY = 86_400_000;
@@ -7,7 +8,7 @@ const HOUR = 3_600_000;
 
 let db: HindsightDB;
 beforeEach(async () => {
-  db = openDatabase();
+  db = await openTestDatabase();
   // 10 days of daily "market" points for AAPL and MSFT, plus a few news items.
   await db.timeline.insertMany(
     Array.from({ length: 10 }, (_, i) => [

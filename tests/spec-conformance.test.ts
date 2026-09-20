@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HindsightDB, openDatabase, parseDuration, windowAround } from "../src/index.js";
+import { HindsightDB, parseDuration, windowAround } from "../src/index.js";
+import { openTestDatabase } from "./helpers/backend.js";
 import type { Event, History, TimelinePoint } from "../src/index.js";
 
 /**
@@ -92,8 +93,8 @@ const ks = (pts: TimelinePoint[] | undefined) => (pts ?? []).map((p) => (p.data 
 const headlines = (pts: TimelinePoint[] | undefined) => (pts ?? []).map((p) => (p.data as { headline: string }).headline);
 
 let db: HindsightDB;
-beforeEach(() => {
-  db = openDatabase();
+beforeEach(async () => {
+  db = await openTestDatabase();
 });
 afterEach(() => db.close());
 
@@ -748,13 +749,15 @@ describe("SDK responsibilities", () => {
     });
 
     it("db.transaction wraps several writes atomically", async () => {
-      expect(() =>
-        db.transaction(() => {
-          void db.events.insert({ id: "t1", timestamp: E, type: "x" });
+      await expect(
+        db.transaction(async () => {
+          await db.timeline.insert({ timestamp: E, entity: "AAPL", namespace: "tx", data: 1 });
+          await db.aliases.add("t1", "AAPL");
           throw new Error("abort");
         }),
-      ).toThrow("abort");
-      expect(await db.events.get("t1")).toBeUndefined();
+      ).rejects.toThrow("abort");
+      expect((await db.timeline.range({ from: E, to: E, namespace: "tx" })).items).toEqual([]);
+      expect(await db.aliases.list()).toEqual([]);
     });
 
     it("id lookups beyond the per-statement list cap are chunked transparently", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HindsightDB, openDatabase } from "../src/index.js";
+import { HindsightDB } from "../src/index.js";
+import { openTestDatabase } from "./helpers/backend.js";
 
 const T0 = Date.UTC(2024, 0, 10); // event time
 const DAY = 86_400_000;
@@ -7,7 +8,7 @@ const HOUR = 3_600_000;
 
 let db: HindsightDB;
 beforeEach(async () => {
-  db = openDatabase();
+  db = await openTestDatabase();
   // Event at day 0 (T0), observed 2h later.
   await db.events.insert({
     id: "ev",
