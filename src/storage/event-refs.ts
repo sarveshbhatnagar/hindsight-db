@@ -1,6 +1,6 @@
-import type { EventRef } from "../types.js";
+import type { EventRef, GcResult } from "../types.js";
 import type { Connection } from "./sqlite.js";
-import { chunks, inList } from "./sqlite.js";
+import { chunks, inList, MAX_LIST } from "./sqlite.js";
 
 /**
  * Fetches events by id from wherever they live; an `EventProvider`'s
@@ -71,5 +71,37 @@ export class EventRefStore {
     const missing = distinct.filter((id) => !present.has(id));
     if (missing.length === 0) return undefined;
     return this.resolver(missing).then((refs) => this.upsert(refs));
+  }
+
+  /**
+   * Drop the stubs of events the resolver no longer knows, and with them
+   * (by cascade) their decisions and outcomes. Ids are checked in chunks,
+   * each chunk deleted in its own transaction, so a large table is swept
+   * without holding the whole id list or a long write lock. Nothing to do
+   * without a resolver: the SQLite event store keeps the stubs in sync itself.
+   */
+  async gc(): Promise<GcResult> {
+    const result: GcResult = { removedEvents: 0, removedDecisions: 0, removedOutcomes: 0 };
+    if (!this.resolver) return result;
+    const page = this.conn.db.prepare(`SELECT id FROM event_refs WHERE id > ? ORDER BY id LIMIT ?`).pluck();
+    let after = "";
+    for (;;) {
+      const ids = page.all(after, MAX_LIST) as string[];
+      if (ids.length === 0) break;
+      after = ids[ids.length - 1]!;
+      const known = new Set((await this.resolver(ids)).map((r) => r.id));
+      const missing = ids.filter((id) => !known.has(id));
+      if (missing.length === 0) continue;
+      this.conn.transaction(() => {
+        const l = inList("event_id", missing);
+        const count = (table: string) =>
+          (this.conn.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${l.sql}`).get(...l.params) as { n: number }).n;
+        result.removedDecisions += count("decisions");
+        result.removedOutcomes += count("outcomes");
+        const del = inList("id", missing);
+        result.removedEvents += this.conn.db.prepare(`DELETE FROM event_refs WHERE ${del.sql}`).run(...del.params).changes;
+      });
+    }
+    return result;
   }
 }

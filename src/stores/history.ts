@@ -64,12 +64,16 @@ export class HistoryStore {
     const ids = [...new Set(eventIds)];
     if (ids.length === 0) return [];
 
-    const events = await this.events.getMany(ids);
-    if (events.length === 0) return [];
+    const current = await this.events.getMany(ids);
+    if (current.length === 0) return [];
 
     // Capped at timeline.range's page limit so `truncated.next` is always a valid range query.
     const maxPoints = assertLimit("maxPoints", opts.maxPoints, DEFAULT_MAX_POINTS, DEFAULT_MAX_POINTS);
-    const windows = events.map((e) => resolveWindow(e, opts));
+    const windows = current.map((e) => resolveWindow(e, opts));
+    // A provider whose events grow after they are first observed hands out
+    // each one as it stood at its contextUntil, so `event.content` is as
+    // safe as `context`. Where the events are immutable this costs nothing.
+    const events = this.events.pointInTime ? await this.asOfContext(current, windows) : current;
     // An event's entities select its timeline streams, widened by their
     // aliases; an explicit `entities` option is taken as given.
     const eventEntities = opts.entities === undefined ? this.aliases.expandEach(events.map((e) => e.entities)) : [];
@@ -97,6 +101,27 @@ export class HistoryStore {
     return events.map((event, i) =>
       assemble(event, windows[i]!, specs[i]!, points[i]!, decisionsByEvent.get(event.id)!, outcomesByEvent.get(event.id)!),
     );
+  }
+
+  /**
+   * Each event as the provider knew it at its window's contextUntil. One
+   * provider call per distinct cutoff — a single one when `contextUntil` was
+   * given, one per event when each defaults to its own observedAt. An event
+   * observed only after its cutoff had no point-in-time state to fetch and is
+   * kept as is; `observedAt > window.contextUntil` tells the caller so.
+   */
+  private async asOfContext(events: Event[], windows: ResolvedWindow[]): Promise<Event[]> {
+    const byCutoff = new Map<number, string[]>();
+    events.forEach((e, i) => {
+      const cutoff = windows[i]!.contextUntil;
+      if (e.observedAt > cutoff) return;
+      const ids = byCutoff.get(cutoff);
+      if (ids) ids.push(e.id);
+      else byCutoff.set(cutoff, [e.id]);
+    });
+    const fetched = await Promise.all([...byCutoff].map(([asOf, ids]) => this.events.getMany(ids, { asOf })));
+    const asOf = new Map(fetched.flat().map((e) => [e.id, e]));
+    return events.map((e) => asOf.get(e.id) ?? e);
   }
 }
 

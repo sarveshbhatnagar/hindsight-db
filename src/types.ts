@@ -256,6 +256,13 @@ export interface EventRef {
   observedAt: number;
 }
 
+/** What `db.gc()` removed: stubs of events the provider no longer has, and their dependents. */
+export interface GcResult {
+  removedEvents: number;
+  removedDecisions: number;
+  removedOutcomes: number;
+}
+
 /** A mapping from an external entity id to a timeline label. */
 export interface Alias {
   externalId: string;
@@ -299,6 +306,11 @@ export interface HistoryQuery {
 }
 
 export interface History {
+  /**
+   * The event. From a provider with point-in-time content (`pointInTime`),
+   * as it stood at `window.contextUntil` — an event observed only after that
+   * cutoff is returned as it stands now.
+   */
   event: Event;
   /** Timeline streams known at `contextUntil` — safe pre-decision context. */
   context: TimelineStreams;

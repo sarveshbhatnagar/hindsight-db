@@ -156,7 +156,7 @@ Returns:
 
 | Field | Contents |
 | --- | --- |
-| `event` | The event. |
+| `event` | The event. From a provider with point-in-time content (insights-db), as it stood at `contextUntil`. |
 | `context` | Timeline streams **observed at or before `contextUntil`** — safe pre-decision context. |
 | `timeline` | Full window `[event − before, event + after]`, cut at `outcomeUntil`. |
 | `decisions` | Decisions with `timestamp ≤ outcomeUntil`. |
@@ -180,7 +180,53 @@ await db.timeline.insert({ timestamp, entity: "AAPL", namespace: "market", data 
 const h = await db.history.get({ eventId: "42", before: "7d" }); // event fetched via provider
 ```
 
-`db.events` is then the provider itself, so it has exactly the methods the provider has — there is no `insert`/`delete` unless the provider offers them. Events must come back with `timestamp`/`observedAt` in epoch ms and their `entities` as the labels the timeline is keyed by. Decisions and outcomes still reference events by id; today that id must also exist in the file's own `events` table, which an upcoming migration relaxes.
+`db.events` is then the provider itself, so it has exactly the methods the provider has — there is no `insert`/`delete` unless the provider offers them. Events must come back with `timestamp`/`observedAt` in epoch ms; their `entities` either are the labels the timeline is keyed by or map to them through `db.aliases`. Decisions and outcomes reference events by id and fetch a local stub from the provider on first use.
+
+A provider whose events keep growing after they are first observed (new facts get attached to an old event) sets `pointInTime` and honours `getMany(ids, { asOf })`; `history` then fetches each event as it stood at its `contextUntil`, so `event.content` never knows more than `context` does.
+
+| Method | Description |
+| --- | --- |
+| `db.gc()` | Drop the decisions and outcomes of events the provider no longer has (it may delete or merge them; nothing cascades across databases). Returns `{ removedEvents, removedDecisions, removedOutcomes }`. A no-op with the SQLite event store. |
+
+### Using insights-db as the event source
+
+[insights-db](https://github.com/sarveshbhatnagar/insights-db) ingests documents into deduplicated real-world events with their facts, on Postgres + pgvector. `InsightsEventProvider` wraps its read API so hindsight-db can keep the context around those events. insights-db is an optional peer dependency (`npm install insights-db`); nothing of it is loaded unless you use the adapter.
+
+```ts
+import { addDuration, openDatabase, InsightsEventProvider } from "hindsight-db";
+import { openInsights } from "insights-db";
+
+const insights = openInsights({ connectionString: process.env.DATABASE_URL });
+const db = openDatabase({ path: "context.db", events: new InsightsEventProvider(insights) });
+// or, to have the adapter import insights-db and open the connection itself:
+// const db = openDatabase({ path: "context.db", events: await InsightsEventProvider.open({ connectionString }) });
+
+// Events name entities by insights' ids; timeline data is keyed by your labels.
+const [meridian] = await db.events.entities({ limit: 1 });
+await db.aliases.add(meridian.entity, "MRDN");
+
+const h = await db.history.get({ eventId, contextUntil: decision.timestamp, outcomeUntil: addDuration(decision.timestamp, "5d") });
+// h.event.content.claims: only what insights had asserted by contextUntil, a later correction not yet applied
+// h.context.market:       your MRDN points observed by contextUntil
+
+await db.gc(); // after insights merged or detached events: drop their orphaned decisions/outcomes
+```
+
+How insights records map to hindsight events:
+
+| insights | hindsight `Event` |
+| --- | --- |
+| `id` | `id` |
+| `occurredAt` (a calendar day) | `timestamp` = that day at **00:00 UTC** — insights knows events to the day, so `before`/`after` windows and `from`/`to` filters work at day granularity; timeline data on the event's own day counts as *after* it |
+| `observedAt` (earliest document date) | `observedAt` |
+| `eventType` | `type` |
+| `entities[].id` | `entities` (insights' numeric ids; map them with `db.aliases`) |
+| `title`, `claims` | `content: { title, claims }` — each claim with `claimId`, `text`, `assertedAt` (epoch ms), `kind`, `supersededBy`, `disputedWith`, `verdict`, `evidenceUrl`, `hidden` |
+| `storylineId`, `pattern`, entity names/types/roles | `metadata: { storylineId, pattern, entityNames }` |
+
+`similar` ranks by insights' **pattern** embedding (written once per event, so a backtest sees the same neighbours at any later date); pass `{ vector: "content" }` to the constructor to rank by the content embedding, which follows the claims as they merge. Filters: `type`, `entities` (any-of), `from`/`to` (rounded to whole days), `asOf`, `excludeIds`. `entitiesAll` is accepted for a single id only, `metadata` filters and `similar`'s `cursor` throw — insights' read API has no equivalent, and a silently wider result would be worse than an error. `getMany(ids, { asOf })` returns each event as insights knew it then, which is what `history` uses. `includeEmbedding` is ignored (insights does not hand out vectors).
+
+The integration test in `tests/insights-integration.test.ts` runs when `DATABASE_URL` points at a Postgres with pgvector (see the container in insights-db's README); it creates its own `hindsight_it` schema there.
 
 ### `db.bulkLoad(fn)`
 
@@ -207,7 +253,8 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 ## Implementation notes
 
 - **Storage**: a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events). All stores share one connection.
-- **Event stubs**: decisions and outcomes do not reference the `events` table directly but `event_refs`, a local `(id, timestamp, observed_at)` stub per event. In the default setup triggers keep it in sync with `events` (inserts, timestamp updates, deletes — the cascade from an event delete flows through it), so it is invisible. It exists so events can live in another database: with `openDatabase({ events: provider })`, `decisions.insert`/`outcomes.insert` fetch the stubs for ids they have not seen from `provider.getMany` *before* opening their write transaction, so `outcomes.insert` still resolves its default timestamp locally and synchronously. Ids the provider does not know fail as unknown events. Once an event's stub exists, later writes for it are synchronous again and may run inside `db.transaction()`.
+- **Event stubs**: decisions and outcomes do not reference the `events` table directly but `event_refs`, a local `(id, timestamp, observed_at)` stub per event. In the default setup triggers keep it in sync with `events` (inserts, timestamp updates, deletes — the cascade from an event delete flows through it), so it is invisible. It exists so events can live in another database: with `openDatabase({ events: provider })`, `decisions.insert`/`outcomes.insert` fetch the stubs for ids they have not seen from `provider.getMany` *before* opening their write transaction, so `outcomes.insert` still resolves its default timestamp locally and synchronously. Ids the provider does not know fail as unknown events. Once an event's stub exists, later writes for it are synchronous again and may run inside `db.transaction()`. Nothing tells the file when the provider drops an event; `db.gc()` asks the provider about every stub, 5000 ids at a time, and deletes the ones it no longer knows (cascading to their decisions and outcomes).
+- **Point-in-time content**: `history.getMany` first fetches the events as they stand (to resolve each window), then — for a provider with `pointInTime` — once more per distinct `contextUntil` with `asOf`, so an explicit cutoff costs one extra call for the whole batch and the default (each event's own `observedAt`) one per event, issued concurrently. An event observed only after its cutoff is returned as it stands.
 - **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one. `migrate()` runs with foreign keys off (a table rebuild's `DROP` would otherwise cascade) and refuses to commit a migration that leaves a foreign-key violation. Versions so far: **v1** initial schema; **v2** `timeline (entity, timestamp)` index; **v3** `event_refs` (decisions/outcomes rebuilt to reference it, populated from existing events) and `entity_aliases`. Opening a v2 file upgrades it in place, keeping all decision and outcome rows.
 - **Vector search**: embeddings are stored as Float32 blobs (native byte order) with a precomputed L2 norm; non-finite components are rejected at insert and query time. `similar()` narrows candidates with SQL filters, then scores cosine similarity in-process with a bounded top-k. This is exact, not approximate — fine up to roughly 10⁵ events per query; swap in an ANN index behind the same interface when that stops being true.
 - **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout, and the event side is behind the `EventProvider` interface, so a networked event store (e.g. Postgres + pgvector) can be dropped in via `openDatabase({ events })` without changing callers.
@@ -258,6 +305,7 @@ src/
   storage/event-refs.ts  local event stubs that decisions/outcomes reference
   events/provider.ts  EventProvider interface (read side of an event source)
   events/sqlite.ts    SqliteEventStore, the default provider (adds writes)
+  events/insights.ts  InsightsEventProvider, adapter over insights-db's read API
   stores/             timeline, decisions, outcomes, history, aliases
 tests/                vitest, one file per store + end-to-end flow
 ```
