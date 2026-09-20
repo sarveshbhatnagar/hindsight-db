@@ -6,8 +6,20 @@ import type {
   Page,
   SimilarQuery,
   SimilarResults,
+  TimestampInput,
   TypeStats,
 } from "../types.js";
+
+export interface GetManyOptions {
+  includeEmbedding?: boolean;
+  /**
+   * Observation-time cutoff: return each event as it stood then, and omit
+   * events not yet observed. Only meaningful for providers whose events
+   * change after they are first seen (`pointInTime`); the SQLite store's
+   * events are immutable, so it ignores it.
+   */
+  asOf?: TimestampInput;
+}
 
 /**
  * The read side of an event source. Everything else in hindsight-db —
@@ -22,9 +34,17 @@ import type {
  * default `SqliteEventStore` has them, an external provider need not.
  */
 export interface EventProvider {
+  /**
+   * Set when `getMany({ asOf })` returns events as they stood at that
+   * observation time — content included — because the source keeps adding to
+   * an event after it is first observed. `history` then fetches each event
+   * at its `contextUntil`, so nothing learned later shows in `event.content`.
+   * Leave unset when events never change after insertion.
+   */
+  readonly pointInTime?: boolean;
   get(id: string, opts?: { includeEmbedding?: boolean }): Promise<Event | undefined>;
   /** Fetch many events by id. Missing ids are omitted; order matches `ids`. */
-  getMany(ids: string[], opts?: { includeEmbedding?: boolean }): Promise<Event[]>;
+  getMany(ids: string[], opts?: GetManyOptions): Promise<Event[]>;
   /** Filtered, paginated listing ordered by (timestamp, id). */
   list(query?: EventListQuery): Promise<Page<Event>>;
   /** Similarity search; the query event itself is always excluded. */

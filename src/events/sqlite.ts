@@ -1,6 +1,6 @@
 import type { Connection } from "../storage/sqlite.js";
 import { asArray, chunks, decodeCursor, encodeCursor, inList, prefixUpperBound } from "../storage/sqlite.js";
-import type { EventProvider } from "./provider.js";
+import type { EventProvider, GetManyOptions } from "./provider.js";
 import { toMillis } from "../time.js";
 import type {
   EntityStats,
@@ -220,8 +220,12 @@ export class SqliteEventStore implements EventProvider {
     return row ? rowToEvent(row, opts.includeEmbedding ?? false) : undefined;
   }
 
-  /** Fetch many events by id. Missing ids are omitted; order matches `ids`. */
-  async getMany(ids: string[], opts: { includeEmbedding?: boolean } = {}): Promise<Event[]> {
+  /**
+   * Fetch many events by id. Missing ids are omitted; order matches `ids`.
+   * `asOf` is ignored: events here never change once inserted, so they stand
+   * at any observation time as they do now.
+   */
+  async getMany(ids: string[], opts: GetManyOptions = {}): Promise<Event[]> {
     if (ids.length === 0) return [];
     const byId = new Map<string, Event>();
     for (const chunk of chunks(ids)) {
