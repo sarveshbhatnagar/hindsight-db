@@ -1,6 +1,6 @@
 {
   "name": "hindsight-db",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Embedded hindsight database: historical events with point-in-time context, the decisions made, and the outcomes observed — without leaking the future into the past.",
   "type": "module",
   "main": "./dist/index.js",
