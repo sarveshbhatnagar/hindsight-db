@@ -12,6 +12,7 @@ import type {
 } from "../types.js";
 import type { EventProvider } from "../events/provider.js";
 import { assertLimit } from "../validate.js";
+import type { AliasStore } from "./aliases.js";
 import type { DecisionStore } from "./decisions.js";
 import type { OutcomeStore } from "./outcomes.js";
 import { groupByNamespace, type TimelineStore, type TimelineWindow, type TimelineWindowSpec } from "./timeline.js";
@@ -42,6 +43,7 @@ export class HistoryStore {
     private readonly timeline: TimelineStore,
     private readonly decisions: DecisionStore,
     private readonly outcomes: OutcomeStore,
+    private readonly aliases: AliasStore,
   ) {}
 
   async get(query: HistoryQuery): Promise<History> {
@@ -68,9 +70,12 @@ export class HistoryStore {
     // Capped at timeline.range's page limit so `truncated.next` is always a valid range query.
     const maxPoints = assertLimit("maxPoints", opts.maxPoints, DEFAULT_MAX_POINTS, DEFAULT_MAX_POINTS);
     const windows = events.map((e) => resolveWindow(e, opts));
+    // An event's entities select its timeline streams, widened by their
+    // aliases; an explicit `entities` option is taken as given.
+    const eventEntities = opts.entities === undefined ? this.aliases.expandEach(events.map((e) => e.entities)) : [];
     const specs: TimelineWindowSpec[] = events.map((e, i) => {
       const w = windows[i]!;
-      const entities = opts.entities !== undefined ? asArray(opts.entities) : e.entities;
+      const entities = opts.entities !== undefined ? asArray(opts.entities) : eventEntities[i];
       return {
         from: w.from,
         to: w.to,

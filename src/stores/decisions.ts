@@ -1,3 +1,4 @@
+import { referencedEventIds, type EventRefStore } from "../storage/event-refs.js";
 import type { Connection } from "../storage/sqlite.js";
 import { chunks, inList } from "../storage/sqlite.js";
 import { toMillis } from "../time.js";
@@ -24,10 +25,12 @@ function rowToDecision(r: DecisionRow): Decision {
 
 export class DecisionStore {
   private readonly conn: Connection;
+  private readonly refs: EventRefStore;
   private readonly prepared;
 
-  constructor(conn: Connection) {
+  constructor(conn: Connection, refs: EventRefStore) {
     this.conn = conn;
+    this.refs = refs;
     this.prepared = {
       insert: this.conn.db.prepare(
         `INSERT INTO decisions (id, event_id, timestamp, action, metadata)
@@ -44,6 +47,10 @@ export class DecisionStore {
   }
 
   async insertMany(inputs: DecisionInput[]): Promise<Decision[]> {
+    // With an external event source, stubs for unseen events are fetched
+    // first; the SQL below then runs synchronously as usual.
+    const pending = this.refs.ensure(referencedEventIds(inputs));
+    if (pending) await pending;
     const rows = this.conn.transaction(() => {
       const normalized = inputs.map((input) => {
       assertId("decision.eventId", input.eventId);

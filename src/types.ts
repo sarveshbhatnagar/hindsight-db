@@ -244,6 +244,31 @@ export interface Outcome {
   metadata: Metadata;
 }
 
+// Event refs and entity aliases --------------------------------------------
+
+/**
+ * Local stub of an event — what decisions and outcomes reference, so that
+ * the events themselves may live in another database.
+ */
+export interface EventRef {
+  id: string;
+  timestamp: number;
+  observedAt: number;
+}
+
+/** A mapping from an external entity id to a timeline label. */
+export interface Alias {
+  externalId: string;
+  entity: string;
+}
+
+export interface AliasListQuery {
+  /** Case-sensitive prefix on the external id. */
+  prefix?: string;
+  /** Max rows. Default 1000. */
+  limit?: number;
+}
+
 // History ------------------------------------------------------------------
 
 export interface HistoryQuery {

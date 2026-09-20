@@ -1,3 +1,4 @@
+import { referencedEventIds, type EventRefStore } from "../storage/event-refs.js";
 import type { Connection } from "../storage/sqlite.js";
 import { chunks, inList } from "../storage/sqlite.js";
 import { parseDuration, toMillis } from "../time.js";
@@ -30,10 +31,12 @@ function rowToOutcome(r: OutcomeRow): Outcome {
 
 export class OutcomeStore {
   private readonly conn: Connection;
+  private readonly refs: EventRefStore;
   private readonly prepared;
 
-  constructor(conn: Connection) {
+  constructor(conn: Connection, refs: EventRefStore) {
     this.conn = conn;
+    this.refs = refs;
     this.prepared = {
       insert: this.conn.db.prepare(
         `INSERT INTO outcomes (id, event_id, decision_id, timestamp, horizon, horizon_ms, result, metadata)
@@ -51,6 +54,10 @@ export class OutcomeStore {
 
   /** Insert many outcomes atomically. Validates that any referenced decision belongs to `eventId`. */
   async insertMany(inputs: OutcomeInput[]): Promise<Outcome[]> {
+    // With an external event source, stubs for unseen events are fetched
+    // first, so `resolveAnchors` below still reads locally and synchronously.
+    const pending = this.refs.ensure(referencedEventIds(inputs));
+    if (pending) await pending;
     const rows = this.conn.transaction(() => {
       for (const input of inputs) {
         assertId("outcome.eventId", input.eventId);
@@ -83,7 +90,7 @@ export class OutcomeStore {
   }
 
   /**
-   * Look up every referenced decision and event in one query each, then
+   * Look up every referenced decision and event stub in one query each, then
    * return a resolver: the decision's timestamp if a decision is referenced,
    * otherwise the event's. The resolver throws if the event/decision does not
    * exist or the decision belongs to another event.
@@ -102,16 +109,7 @@ export class OutcomeStore {
         decisions.set(d.id, d);
       }
     }
-    const events = new Map<string, number>();
-    for (const chunk of chunks(eventIds)) {
-      const l = inList("id", chunk);
-      for (const e of this.conn.db.prepare(`SELECT id, timestamp FROM events WHERE ${l.sql}`).all(...l.params) as {
-        id: string;
-        timestamp: number;
-      }[]) {
-        events.set(e.id, e.timestamp);
-      }
-    }
+    const events = this.refs.getMany(eventIds);
     return (input) => {
       if (input.decisionId) {
         const d = decisions.get(input.decisionId);
@@ -121,9 +119,9 @@ export class OutcomeStore {
         }
         return d.timestamp;
       }
-      const ts = events.get(input.eventId);
-      if (ts === undefined) throw new Error(`Event not found: ${input.eventId}`);
-      return ts;
+      const ref = events.get(input.eventId);
+      if (ref === undefined) throw new Error(`Event not found: ${input.eventId}`);
+      return ref.timestamp;
     };
   }
 
