@@ -7,6 +7,12 @@
  * Writes an on-disk database under BENCH_DIR (default: a temp directory),
  * deletes it when done. Scale knobs are env-overridable so the run stays under a
  * few minutes; defaults match the spec (100k events, 2M timeline points, ...).
+ *
+ * STORAGE=postgres DATABASE_URL=postgres://... puts the context (timeline,
+ * decisions, outcomes) in Postgres — schema `hindsight_bench`, emptied first —
+ * with the events staying in the SQLite file as the event source. The
+ * SQLite-only sections (checkpoint, similar() profile, pragma experiment) are
+ * skipped in that mode.
  */
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
@@ -34,6 +40,8 @@ const N_TYPES = 10;
 const EVENT_BATCH = 1000;
 const TIMELINE_BATCH = 10_000;
 const RUNS = num("RUNS", 5);
+const STORAGE = process.env.STORAGE === "postgres" ? "postgres" : "sqlite";
+const DATABASE_URL = process.env.DATABASE_URL;
 
 const DAY = 86_400_000;
 const T0 = Date.parse("2020-01-01T00:00:00Z");
@@ -120,12 +128,12 @@ async function main(): Promise<void> {
   mkdirSync(BENCH_DIR, { recursive: true });
   for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(DB_PATH + suffix, { force: true });
 
-  console.log(`hindsight-db scale bench  node ${process.version}  ${new Date().toISOString()}`);
+  console.log(`hindsight-db scale bench  node ${process.version}  ${new Date().toISOString()}  context storage: ${STORAGE}`);
   console.log(
     `events=${N_EVENTS} dim=${DIM}  big=${N_BIG}@${BIG_DIM}  timeline=${N_ENTITIES}x${NAMESPACES.length}x${N_DAYS}=${N_ENTITIES * NAMESPACES.length * N_DAYS}  runs=${RUNS}\n`,
   );
   const tAll = performance.now();
-  const db = openDatabase({ path: DB_PATH });
+  const { db, close } = await openBenchDatabase();
 
   // ------------------------------------------------------------------ ingest
   console.log("== 1. Ingest");
@@ -272,10 +280,12 @@ async function main(): Promise<void> {
     record("ingest", `outcomes x${fmtInt(N_OUT)} (batch ${EVENT_BATCH * 2})`, `${fmtInt(N_OUT / (oms / 1000))} rows/s`, `${fmt(oms / 1000, 2)} s`);
   }
 
-  record("ingest", "db size after ingest (main + wal)", `${fmt(fileSizeMB())} MB`);
-  // Checkpoint so the query phase reads from the main file, not a huge WAL.
-  (db as any).conn.db.pragma("wal_checkpoint(TRUNCATE)");
-  record("ingest", "db size after checkpoint", `${fmt(fileSizeMB())} MB`);
+  record("ingest", `${STORAGE === "postgres" ? "events file" : "db"} size after ingest (main + wal)`, `${fmt(fileSizeMB())} MB`);
+  if (STORAGE === "sqlite") {
+    // Checkpoint so the query phase reads from the main file, not a huge WAL.
+    (db as any).conn.db.pragma("wal_checkpoint(TRUNCATE)");
+    record("ingest", "db size after checkpoint", `${fmt(fileSizeMB())} MB`);
+  }
   console.log(`  [elapsed ${fmt((performance.now() - tAll) / 1000)} s]\n`);
 
   // ----------------------------------------------------------------- similar
@@ -384,12 +394,14 @@ async function main(): Promise<void> {
   console.log(`  [elapsed ${fmt((performance.now() - tAll) / 1000)} s]\n`);
 
   // ----------------------------------------------------------------- profile
-  console.log("== 6. Profile: where does similar() spend its time? (100k-row scan, median of runs)");
-  db.close();
-  await profileSimilar(qvec);
+  await close();
+  if (STORAGE === "sqlite") {
+    console.log("== 6. Profile: where does similar() spend its time? (100k-row scan, median of runs)");
+    await profileSimilar(qvec);
 
-  console.log("\n== 7. Ingest pragma experiment (separate db, reduced scale)");
-  await ingestPragmaExperiment();
+    console.log("\n== 7. Ingest pragma experiment (separate db, reduced scale)");
+    await ingestPragmaExperiment();
+  }
 
   // ----------------------------------------------------------------- summary
   console.log("\n== Results table\n");
@@ -400,6 +412,27 @@ async function main(): Promise<void> {
 
   for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(DB_PATH + suffix, { force: true });
   console.log("Deleted benchmark database.");
+}
+
+/**
+ * The database under test: everything in one SQLite file, or — STORAGE=postgres —
+ * the events in the SQLite file and the context in Postgres.
+ */
+async function openBenchDatabase(): Promise<{ db: ReturnType<typeof openDatabase>; close: () => Promise<void> }> {
+  const events = openDatabase({ path: DB_PATH });
+  if (STORAGE === "sqlite") return { db: events, close: () => events.close() };
+  if (!DATABASE_URL) throw new Error("STORAGE=postgres needs DATABASE_URL");
+  const db = openDatabase({ storage: "postgres", connectionString: DATABASE_URL, schema: "hindsight_bench", events: events.events });
+  await db.ready();
+  await (db as any).conn.pool.query({ text: "TRUNCATE timeline, event_refs, decisions, outcomes, entity_aliases RESTART IDENTITY CASCADE" });
+  return {
+    // `db.events` is the SQLite store, so the events sections run unchanged.
+    db: db as unknown as ReturnType<typeof openDatabase>,
+    close: async () => {
+      await db.close();
+      await events.close();
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

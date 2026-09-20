@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HindsightDB, openDatabase } from "../src/index.js";
+import { HindsightDB } from "../src/index.js";
+import { ERRORS, openTestDatabase } from "./helpers/backend.js";
 
 const T0 = Date.UTC(2024, 0, 1);
 const DAY = 86_400_000;
@@ -7,7 +8,7 @@ const HOUR = 3_600_000;
 
 let db: HindsightDB;
 beforeEach(async () => {
-  db = openDatabase();
+  db = await openTestDatabase();
   await db.events.insert({ id: "ev", timestamp: T0, type: "earnings", entities: ["AAPL"] });
   await db.events.insert({ id: "ev2", timestamp: T0, type: "earnings", entities: ["MSFT"] });
 });
@@ -37,7 +38,7 @@ describe("decisions", () => {
   });
 
   it("requires an existing event and an action", async () => {
-    await expect(db.decisions.insert({ eventId: "nope", timestamp: T0, action: 1 })).rejects.toThrow(/FOREIGN KEY/);
+    await expect(db.decisions.insert({ eventId: "nope", timestamp: T0, action: 1 })).rejects.toThrow(ERRORS.foreignKey);
     await expect(db.decisions.insert({ eventId: "ev", timestamp: T0, action: undefined as never })).rejects.toThrow(
       /action is required/,
     );

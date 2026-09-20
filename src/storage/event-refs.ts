@@ -1,6 +1,5 @@
 import type { EventRef, GcResult } from "../types.js";
-import type { Connection } from "./sqlite.js";
-import { chunks, inList, MAX_LIST } from "./sqlite.js";
+import { all, chunks, inList, insertStatements, isThenable, MAX_LIST, run, tx, type Op, type Storage } from "./storage.js";
 
 /**
  * Fetches events by id from wherever they live; an `EventProvider`'s
@@ -22,38 +21,39 @@ export function referencedEventIds(inputs: readonly { eventId: unknown }[]): str
  * id is fetched on first use through `resolver`.
  */
 export class EventRefStore {
-  private readonly conn: Connection;
+  private readonly storage: Storage;
   private readonly resolver: EventRefResolver | undefined;
-  private readonly prepared;
 
-  constructor(conn: Connection, resolver?: EventRefResolver) {
-    this.conn = conn;
+  constructor(storage: Storage, resolver?: EventRefResolver) {
+    this.storage = storage;
     this.resolver = resolver;
-    this.prepared = {
-      upsert: conn.db.prepare(
-        `INSERT INTO event_refs (id, timestamp, observed_at) VALUES (@id, @timestamp, @observed_at)
-         ON CONFLICT (id) DO UPDATE SET timestamp = excluded.timestamp, observed_at = excluded.observed_at`,
-      ),
-    };
   }
 
   /** Stubs for `ids`, keyed by id. Unknown ids are omitted. */
-  getMany(ids: readonly string[]): Map<string, EventRef> {
+  *getMany(ids: readonly string[]): Op<Map<string, EventRef>> {
     const out = new Map<string, EventRef>();
     for (const chunk of chunks(ids)) {
       const l = inList("id", chunk);
-      const rows = this.conn.db
-        .prepare(`SELECT id, timestamp, observed_at FROM event_refs WHERE ${l.sql}`)
-        .all(...l.params) as { id: string; timestamp: number; observed_at: number }[];
+      const rows = yield* all<{ id: string; timestamp: number; observed_at: number }>(
+        `SELECT id, timestamp, observed_at FROM event_refs WHERE ${l.sql}`,
+        l.params,
+      );
       for (const r of rows) out.set(r.id, { id: r.id, timestamp: r.timestamp, observedAt: r.observed_at });
     }
     return out;
   }
 
   /** Insert or refresh stubs. */
-  upsert(refs: readonly EventRef[]): void {
-    this.conn.transaction(() => {
-      for (const r of refs) this.prepared.upsert.run({ id: r.id, timestamp: r.timestamp, observed_at: r.observedAt });
+  *upsert(refs: readonly EventRef[]): Op<void> {
+    if (refs.length === 0) return;
+    yield* tx(function* () {
+      const statements = insertStatements(
+        "event_refs",
+        ["id", "timestamp", "observed_at"],
+        refs.map((r) => [r.id, r.timestamp, r.observedAt]),
+        " ON CONFLICT (id) DO UPDATE SET timestamp = excluded.timestamp, observed_at = excluded.observed_at",
+      );
+      for (const s of statements) yield* run(s.sql, s.params);
     });
   }
 
@@ -67,10 +67,15 @@ export class EventRefStore {
   ensure(ids: readonly string[]): Promise<void> | undefined {
     if (!this.resolver || ids.length === 0) return undefined;
     const distinct = [...new Set(ids)];
-    const present = this.getMany(distinct);
-    const missing = distinct.filter((id) => !present.has(id));
-    if (missing.length === 0) return undefined;
-    return this.resolver(missing).then((refs) => this.upsert(refs));
+    const present = this.storage.run(this.getMany(distinct));
+    const fetchMissing = (known: Map<string, EventRef>): Promise<void> | undefined => {
+      const missing = distinct.filter((id) => !known.has(id));
+      if (missing.length === 0) return undefined;
+      return this.resolver!(missing).then((refs) => this.storage.run(this.upsert(refs)));
+    };
+    // On Postgres the presence check is itself async; then so is the whole thing.
+    if (isThenable(present)) return Promise.resolve(present).then((known) => fetchMissing(known));
+    return fetchMissing(present);
   }
 
   /**
@@ -83,24 +88,33 @@ export class EventRefStore {
   async gc(): Promise<GcResult> {
     const result: GcResult = { removedEvents: 0, removedDecisions: 0, removedOutcomes: 0 };
     if (!this.resolver) return result;
-    const page = this.conn.db.prepare(`SELECT id FROM event_refs WHERE id > ? ORDER BY id LIMIT ?`).pluck();
     let after = "";
     for (;;) {
-      const ids = page.all(after, MAX_LIST) as string[];
+      const ids = (
+        await this.storage.run(all<{ id: string }>(`SELECT id FROM event_refs WHERE id > ? ORDER BY id LIMIT ?`, [after, MAX_LIST]))
+      ).map((r) => r.id);
       if (ids.length === 0) break;
       after = ids[ids.length - 1]!;
       const known = new Set((await this.resolver(ids)).map((r) => r.id));
       const missing = ids.filter((id) => !known.has(id));
       if (missing.length === 0) continue;
-      this.conn.transaction(() => {
-        const l = inList("event_id", missing);
-        const count = (table: string) =>
-          (this.conn.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${l.sql}`).get(...l.params) as { n: number }).n;
-        result.removedDecisions += count("decisions");
-        result.removedOutcomes += count("outcomes");
-        const del = inList("id", missing);
-        result.removedEvents += this.conn.db.prepare(`DELETE FROM event_refs WHERE ${del.sql}`).run(...del.params).changes;
-      });
+      const removed = await this.storage.run(
+        tx(function* () {
+          const l = inList("event_id", missing);
+          const count = function* (table: string): Op<number> {
+            const rows = yield* all<{ n: number }>(`SELECT count(*) AS n FROM ${table} WHERE ${l.sql}`, l.params);
+            return rows[0]!.n;
+          };
+          const decisions = yield* count("decisions");
+          const outcomes = yield* count("outcomes");
+          const del = inList("id", missing);
+          const events = (yield* run(`DELETE FROM event_refs WHERE ${del.sql}`, del.params)).changes;
+          return { events, decisions, outcomes };
+        }),
+      );
+      result.removedEvents += removed.events;
+      result.removedDecisions += removed.decisions;
+      result.removedOutcomes += removed.outcomes;
     }
     return result;
   }

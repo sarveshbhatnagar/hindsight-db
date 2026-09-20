@@ -31,17 +31,23 @@
     "better-sqlite3": "^13.0.3"
   },
   "peerDependencies": {
-    "insights-db": ">=0.3.0"
+    "insights-db": ">=0.3.0",
+    "pg": ">=8.11.0"
   },
   "peerDependenciesMeta": {
     "insights-db": {
+      "optional": true
+    },
+    "pg": {
       "optional": true
     }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.5.1",
+    "@types/pg": "^8.23.1",
     "insights-db": "^0.3.0",
+    "pg": "^8.23.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.0"
   },
@@ -61,6 +67,7 @@
     "vector-search",
     "backtesting",
     "point-in-time",
-    "agents"
+    "agents",
+    "postgres"
   ]
 }

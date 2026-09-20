@@ -1,5 +1,4 @@
-import type { Connection } from "../storage/sqlite.js";
-import { asArray } from "../storage/sqlite.js";
+import { asArray, tx, type Storage } from "../storage/storage.js";
 import { toMillis, windowAround } from "../time.js";
 import type {
   Decision,
@@ -38,7 +37,7 @@ interface ResolvedWindow {
  */
 export class HistoryStore {
   constructor(
-    private readonly conn: Connection,
+    private readonly storage: Storage,
     private readonly events: EventProvider,
     private readonly timeline: TimelineStore,
     private readonly decisions: DecisionStore,
@@ -74,29 +73,34 @@ export class HistoryStore {
     // each one as it stood at its contextUntil, so `event.content` is as
     // safe as `context`. Where the events are immutable this costs nothing.
     const events = this.events.pointInTime ? await this.asOfContext(current, windows) : current;
-    // An event's entities select its timeline streams, widened by their
-    // aliases; an explicit `entities` option is taken as given.
-    const eventEntities = opts.entities === undefined ? this.aliases.expandEach(events.map((e) => e.entities)) : [];
-    const specs: TimelineWindowSpec[] = events.map((e, i) => {
-      const w = windows[i]!;
-      const entities = opts.entities !== undefined ? asArray(opts.entities) : eventEntities[i];
-      return {
-        from: w.from,
-        to: w.to,
-        // outcomeUntil >= contextUntil, so this is the superset of both views; sliced below.
-        asOf: w.outcomeUntil,
-        ...(entities && entities.length ? { entities } : {}),
-        ...(opts.namespace !== undefined ? { namespaces: asArray(opts.namespace) } : {}),
-        limit: maxPoints,
-      };
-    });
-
     const foundIds = events.map((e) => e.id);
-    const [points, decisionsByEvent, outcomesByEvent] = this.conn.transaction(() => [
-      this.timeline.fetchWindows(specs),
-      this.decisions.forEvents(foundIds),
-      this.outcomes.forEvents(foundIds),
-    ]);
+    const store = this;
+    // One read transaction for everything local: alias expansion, every
+    // timeline window, and the decisions and outcomes of all events.
+    const { specs, points, decisionsByEvent, outcomesByEvent } = await this.storage.run(
+      tx(function* () {
+        // An event's entities select its timeline streams, widened by their
+        // aliases; an explicit `entities` option is taken as given.
+        const eventEntities = opts.entities === undefined ? yield* store.aliases.expandEach(events.map((e) => e.entities)) : [];
+        const specs: TimelineWindowSpec[] = events.map((e, i) => {
+          const w = windows[i]!;
+          const entities = opts.entities !== undefined ? asArray(opts.entities) : eventEntities[i];
+          return {
+            from: w.from,
+            to: w.to,
+            // outcomeUntil >= contextUntil, so this is the superset of both views; sliced below.
+            asOf: w.outcomeUntil,
+            ...(entities && entities.length ? { entities } : {}),
+            ...(opts.namespace !== undefined ? { namespaces: asArray(opts.namespace) } : {}),
+            limit: maxPoints,
+          };
+        });
+        const points = yield* store.timeline.fetchWindows(specs);
+        const decisionsByEvent = yield* store.decisions.forEvents(foundIds);
+        const outcomesByEvent = yield* store.outcomes.forEvents(foundIds);
+        return { specs, points, decisionsByEvent, outcomesByEvent };
+      }),
+    );
 
     return events.map((event, i) =>
       assemble(event, windows[i]!, specs[i]!, points[i]!, decisionsByEvent.get(event.id)!, outcomesByEvent.get(event.id)!),

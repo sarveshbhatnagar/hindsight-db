@@ -1,19 +1,23 @@
 import type { EventProvider } from "./events/provider.js";
 import { SqliteEventStore } from "./events/sqlite.js";
 import { EventRefStore } from "./storage/event-refs.js";
-import { Connection } from "./storage/sqlite.js";
+import { PostgresStorage } from "./storage/postgres.js";
+import { SqliteStorage } from "./storage/sqlite.js";
+import type { Storage } from "./storage/storage.js";
 import { AliasStore } from "./stores/aliases.js";
 import { DecisionStore } from "./stores/decisions.js";
 import { HistoryStore } from "./stores/history.js";
 import { OutcomeStore } from "./stores/outcomes.js";
 import { TimelineStore } from "./stores/timeline.js";
-import type { DatabaseOptions, GcResult } from "./types.js";
+import type { DatabaseOptions, GcResult, PostgresDatabaseOptions, SqliteDatabaseOptions } from "./types.js";
 
 export * from "./types.js";
 export { addDuration, parseDuration, toMillis, windowAround } from "./time.js";
 export { uuidv7 } from "./ids.js";
 export { cosine } from "./vector.js";
 export { SCHEMA_VERSION, SchemaVersionError } from "./storage/migrations.js";
+export { POSTGRES_SCHEMA_VERSION } from "./storage/postgres.js";
+export type { PgPool, PgPoolClient, PgQueryConfig, PgQueryResult, PgQueryable, PgTypesConfig } from "./storage/postgres.js";
 export type { EventRefResolver } from "./storage/event-refs.js";
 export { InsightsEventProvider } from "./events/insights.js";
 export type {
@@ -53,14 +57,24 @@ export class HindsightDB<E extends EventProvider = SqliteEventStore> {
   readonly history: HistoryStore;
   /** External entity id → timeline label mappings, applied when an event's entities select its timeline. */
   readonly aliases: AliasStore;
-  private readonly conn: Connection;
+  /** Which backend holds the context. */
+  readonly storage: "sqlite" | "postgres";
+  private readonly conn: Storage;
   private readonly refs: EventRefStore;
 
   constructor(options: DatabaseOptions<E> = {}) {
-    this.conn = new Connection(options);
-    // Without an external provider, events live in the same file as the context.
     const external = options.events;
-    this.events = (external ?? new SqliteEventStore(this.conn)) as E;
+    if (options.storage === "postgres") {
+      if (!external) {
+        throw new TypeError("The Postgres backend stores only the context; pass an external event source via `events`");
+      }
+      this.conn = new PostgresStorage(options);
+    } else {
+      this.conn = new SqliteStorage(options);
+    }
+    this.storage = this.conn.dialect.name;
+    // Without an external provider, events live in the same file as the context.
+    this.events = (external ?? new SqliteEventStore(this.conn as SqliteStorage)) as E;
     // Decisions and outcomes reference event stubs rather than the events
     // table. The SQLite store fills the stubs through triggers; an external
     // provider is asked for the events it owns the first time they are referenced.
@@ -72,9 +86,22 @@ export class HindsightDB<E extends EventProvider = SqliteEventStore> {
     this.history = new HistoryStore(this.conn, this.events, this.timeline, this.decisions, this.outcomes, this.aliases);
   }
 
-  /** Schema version of the open file (equals SCHEMA_VERSION after open). */
+  /**
+   * Resolves once the schema is in place. SQLite migrates synchronously on
+   * open, so this is immediate; Postgres connects and migrates on first use,
+   * and every operation waits for it — await this to surface connection or
+   * migration errors up front.
+   */
+  ready(): Promise<void> {
+    return this.conn.ready();
+  }
+
+  /**
+   * Schema version of the open database (equals `SCHEMA_VERSION` for SQLite,
+   * `POSTGRES_SCHEMA_VERSION` for Postgres once `ready()` has resolved).
+   */
   get schemaVersion(): number {
-    return this.conn.db.pragma("user_version", { simple: true }) as number;
+    return this.conn.schemaVersion;
   }
 
   /**
@@ -102,24 +129,44 @@ export class HindsightDB<E extends EventProvider = SqliteEventStore> {
     return this.refs.gc();
   }
 
-  /** Run several writes atomically. */
-  transaction<T>(fn: () => T): T {
+  /**
+   * Run several writes atomically. Store calls made inside `fn` join the
+   * transaction; nested calls join the enclosing one.
+   *
+   * With an async `fn`, await each store call — the transaction commits when
+   * the returned promise resolves and rolls back when it rejects. Works the
+   * same on both backends.
+   *
+   * With a synchronous `fn` on SQLite, store methods have executed their SQL
+   * by the time they return their promise, so several can be issued inside
+   * `fn` without awaiting and the transaction commits before this returns
+   * (unless another context's async transaction is in flight, in which case
+   * `fn` runs, and a promise is returned, once that has ended). On Postgres a
+   * transaction is always asynchronous and a promise is always returned.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
+  transaction<T>(fn: () => T): T | Promise<Awaited<T>>;
+  transaction<T>(fn: () => T): T | Promise<Awaited<T>> {
     return this.conn.transaction(fn);
   }
 
-  close(): void {
-    this.conn.close();
+  /** Close the connection (or, on Postgres, the pool this database created). */
+  close(): Promise<void> {
+    return this.conn.close();
   }
 }
 
 /** Open a database whose events live in the SQLite file alongside the context. */
-export function openDatabase(options?: DatabaseOptions & { events?: undefined }): HindsightDB<SqliteEventStore>;
+export function openDatabase(options?: SqliteDatabaseOptions & { events?: undefined }): HindsightDB<SqliteEventStore>;
 /**
  * Open a database whose events come from an external `EventProvider`; only
- * timeline, decisions and outcomes are stored in the SQLite file. `db.events`
- * is the provider itself, so it exposes exactly the methods the provider has.
+ * timeline, decisions, outcomes and aliases are stored — in the SQLite file,
+ * or in Postgres with `storage: "postgres"`. `db.events` is the provider
+ * itself, so it exposes exactly the methods the provider has.
  */
-export function openDatabase<E extends EventProvider>(options: DatabaseOptions<E> & { events: E }): HindsightDB<E>;
+export function openDatabase<E extends EventProvider>(
+  options: (SqliteDatabaseOptions | PostgresDatabaseOptions) & { events: E },
+): HindsightDB<E>;
 export function openDatabase<E extends EventProvider>(options: DatabaseOptions<E> = {}): HindsightDB<E> {
   return new HindsightDB<E>(options);
 }

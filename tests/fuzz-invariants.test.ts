@@ -12,7 +12,6 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  openDatabase,
   type HindsightDB,
   type Decision,
   type DurationInput,
@@ -27,6 +26,7 @@ import {
   type TimelineStreams,
   type TimestampInput,
 } from "../src/index.js";
+import { openTestDatabase } from "./helpers/backend.js";
 
 // ---------------------------------------------------------------------------
 // PRNG (mulberry32) — deterministic per seed, no dependencies.
@@ -159,7 +159,7 @@ function randomVector(rng: Rng, dim: number): number[] {
 
 async function buildWorld(seed: number): Promise<World> {
   const rng = new Rng(seed);
-  const db = openDatabase();
+  const db = await openTestDatabase();
   const dim = rng.int(2, 4);
 
   // Events. Ids are shuffled so (timestamp, id) ordering is independent of insertion order.

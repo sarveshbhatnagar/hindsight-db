@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HindsightDB, openDatabase, type Event, type EventProvider } from "../src/index.js";
 import { EventRefStore } from "../src/storage/event-refs.js";
-import { Connection } from "../src/storage/sqlite.js";
+import { SqliteStorage } from "../src/storage/sqlite.js";
 import { DecisionStore } from "../src/stores/decisions.js";
 import { OutcomeStore } from "../src/stores/outcomes.js";
 import type { EventRef } from "../src/types.js";
@@ -170,7 +170,7 @@ describe("event_refs", () => {
 });
 
 describe("external event source: stubs are fetched before the write", () => {
-  let conn: Connection;
+  let conn: SqliteStorage;
   let resolver: ReturnType<typeof vi.fn<(ids: string[]) => Promise<EventRef[]>>>;
   let decisions: DecisionStore;
   let outcomes: OutcomeStore;
@@ -180,7 +180,7 @@ describe("external event source: stubs are fetched before the write", () => {
   ]);
 
   beforeEach(() => {
-    conn = new Connection();
+    conn = new SqliteStorage();
     resolver = vi.fn(async (ids: string[]) => ids.flatMap((id) => (remote.has(id) ? [remote.get(id)!] : [])));
     const refs = new EventRefStore(conn, resolver);
     decisions = new DecisionStore(conn, refs);
