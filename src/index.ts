@@ -1,6 +1,7 @@
+import type { EventProvider } from "./events/provider.js";
+import { SqliteEventStore } from "./events/sqlite.js";
 import { Connection } from "./storage/sqlite.js";
 import { DecisionStore } from "./stores/decisions.js";
-import { EventStore } from "./stores/events.js";
 import { HistoryStore } from "./stores/history.js";
 import { OutcomeStore } from "./stores/outcomes.js";
 import { TimelineStore } from "./stores/timeline.js";
@@ -11,7 +12,9 @@ export { addDuration, parseDuration, toMillis, windowAround } from "./time.js";
 export { uuidv7 } from "./ids.js";
 export { cosine } from "./vector.js";
 export { SCHEMA_VERSION, SchemaVersionError } from "./storage/migrations.js";
-export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
+export type { EventProvider, SqliteEventStore, TimelineStore, DecisionStore, OutcomeStore, HistoryStore };
+/** The default (SQLite-backed) event store. Alias kept for callers that imported it under this name. */
+export type EventStore = SqliteEventStore;
 
 /**
  * The hindsight-db database handle.
@@ -21,18 +24,22 @@ export type { EventStore, TimelineStore, DecisionStore, OutcomeStore, HistorySto
  * const candidates = await db.events.similar({ event: currentEvent, limit: 20 });
  * const history = await db.history.getMany({ eventIds: candidates.map(c => c.id), before: "14d", after: "5d" });
  * ```
+ *
+ * `E` is the type of `db.events`: the writable `SqliteEventStore` by default,
+ * or whatever `EventProvider` was passed via `options.events`.
  */
-export class HindsightDB {
-  readonly events: EventStore;
+export class HindsightDB<E extends EventProvider = SqliteEventStore> {
+  readonly events: E;
   readonly timeline: TimelineStore;
   readonly decisions: DecisionStore;
   readonly outcomes: OutcomeStore;
   readonly history: HistoryStore;
   private readonly conn: Connection;
 
-  constructor(options: DatabaseOptions = {}) {
+  constructor(options: DatabaseOptions<E> = {}) {
     this.conn = new Connection(options);
-    this.events = new EventStore(this.conn);
+    // Without an external provider, events live in the same file as the context.
+    this.events = (options.events ?? new SqliteEventStore(this.conn)) as E;
     this.timeline = new TimelineStore(this.conn, this.events);
     this.decisions = new DecisionStore(this.conn);
     this.outcomes = new OutcomeStore(this.conn);
@@ -69,6 +76,14 @@ export class HindsightDB {
   }
 }
 
-export function openDatabase(options: DatabaseOptions = {}): HindsightDB {
-  return new HindsightDB(options);
+/** Open a database whose events live in the SQLite file alongside the context. */
+export function openDatabase(options?: DatabaseOptions & { events?: undefined }): HindsightDB<SqliteEventStore>;
+/**
+ * Open a database whose events come from an external `EventProvider`; only
+ * timeline, decisions and outcomes are stored in the SQLite file. `db.events`
+ * is the provider itself, so it exposes exactly the methods the provider has.
+ */
+export function openDatabase<E extends EventProvider>(options: DatabaseOptions<E> & { events: E }): HindsightDB<E>;
+export function openDatabase<E extends EventProvider>(options: DatabaseOptions<E> = {}): HindsightDB<E> {
+  return new HindsightDB<E>(options);
 }

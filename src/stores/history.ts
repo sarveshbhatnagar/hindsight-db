@@ -10,9 +10,9 @@ import type {
   Outcome,
   TimelineRangeQuery,
 } from "../types.js";
+import type { EventProvider } from "../events/provider.js";
 import { assertLimit } from "../validate.js";
 import type { DecisionStore } from "./decisions.js";
-import type { EventStore } from "./events.js";
 import type { OutcomeStore } from "./outcomes.js";
 import { groupByNamespace, type TimelineStore, type TimelineWindow, type TimelineWindowSpec } from "./timeline.js";
 
@@ -38,7 +38,7 @@ interface ResolvedWindow {
 export class HistoryStore {
   constructor(
     private readonly conn: Connection,
-    private readonly events: EventStore,
+    private readonly events: EventProvider,
     private readonly timeline: TimelineStore,
     private readonly decisions: DecisionStore,
     private readonly outcomes: OutcomeStore,

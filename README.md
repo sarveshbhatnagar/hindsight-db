@@ -149,6 +149,22 @@ Returns:
 
 `history.getMany({ eventIds, ...sameOptions })` returns one `History` per found id, in input order, with all lookups batched into a single read transaction.
 
+### External event source
+
+Events can live somewhere else — a system that ingests and deduplicates them on its own — while hindsight-db keeps the context around them. Pass an `EventProvider` (the read half of `db.events`: `get`, `getMany`, `list`, `similar`, `entities`, `types`) and only the timeline, decisions and outcomes are stored in the SQLite file:
+
+```ts
+import { openDatabase, type EventProvider } from "hindsight-db";
+
+const provider: EventProvider = /* adapter over your event store */;
+const db = openDatabase({ path: "context.db", events: provider });
+
+await db.timeline.insert({ timestamp, entity: "AAPL", namespace: "market", data });
+const h = await db.history.get({ eventId: "42", before: "7d" }); // event fetched via provider
+```
+
+`db.events` is then the provider itself, so it has exactly the methods the provider has — there is no `insert`/`delete` unless the provider offers them. Events must come back with `timestamp`/`observedAt` in epoch ms and their `entities` as the labels the timeline is keyed by. Decisions and outcomes still reference events by id; today that id must also exist in the file's own `events` table, which an upcoming migration relaxes.
+
 ### `db.bulkLoad(fn)`
 
 Backfill mode. Drops all secondary indexes for the duration of `fn` and rebuilds them afterwards, turning random index inserts into sequential appends. Use for initial imports, not routine writes; reads inside `fn` work but are slow. If the process dies mid-load, the next `openDatabase` recreates any missing indexes.
@@ -176,7 +192,7 @@ Window bounds (`before`/`after`, `from`/`to`) apply to **event time**. Cutoffs (
 - **Storage**: a single SQLite file via `better-sqlite3` (WAL mode, foreign keys on, cascading deletes from events). All stores share one connection.
 - **Schema migrations**: the schema is an append-only list in `src/storage/migrations.ts`, versioned with SQLite's `PRAGMA user_version`. Opening a file applies any migrations it hasn't seen, each in its own transaction, so older files upgrade in place and a failed migration leaves the file untouched. A file written by a newer library version is refused with `SchemaVersionError` rather than misread. `db.schemaVersion` / `SCHEMA_VERSION` expose the numbers. To change the schema: append an entry, never edit a shipped one.
 - **Vector search**: embeddings are stored as Float32 blobs (native byte order) with a precomputed L2 norm; non-finite components are rejected at insert and query time. `similar()` narrows candidates with SQL filters, then scores cosine similarity in-process with a bounded top-k. This is exact, not approximate — fine up to roughly 10⁵ events per query; swap in an ANN index behind the same interface when that stops being true.
-- **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout so a networked backend (e.g. Postgres + pgvector) can be dropped in without changing callers.
+- **Parallelism**: SQLite is synchronous and single-writer, so "parallel" retrieval is implemented as *batched* retrieval — `history.getMany` runs one query for events, one for decisions, one for outcomes, and all timeline windows inside one read transaction. The API is promise-based throughout, and the event side is behind the `EventProvider` interface, so a networked event store (e.g. Postgres + pgvector) can be dropped in via `openDatabase({ events })` without changing callers.
 - **Pagination**: `events.list` and `timeline.range` use opaque keyset cursors on `(timestamp, id)`.
 - **List sizes**: id lookups (`events.getMany`, `history.getMany`) are chunked internally, so any number of ids is fine. Filter lists (`entities`, `type`, `excludeIds`) are capped at 5000 values per query and fail with a clear error beyond that.
 - **Transactions**: `insertMany` on every store is atomic. `db.transaction(fn)` wraps several writes all-or-nothing: `fn` must be synchronous (store methods execute their SQL before their first `await`, so calling several inside `fn` works), and if any of them fails, the outer transaction rolls back and rethrows that error.
@@ -221,7 +237,9 @@ src/
   vector.ts           embedding encoding, cosine
   storage/sqlite.ts   connection + SQL helpers
   storage/migrations.ts  versioned schema (append-only)
-  stores/             events, timeline, decisions, outcomes, history
+  events/provider.ts  EventProvider interface (read side of an event source)
+  events/sqlite.ts    SqliteEventStore, the default provider (adds writes)
+  stores/             timeline, decisions, outcomes, history
 tests/                vitest, one file per store + end-to-end flow
 ```
 

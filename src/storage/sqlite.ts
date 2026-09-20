@@ -128,3 +128,9 @@ export function decodeCursor<T extends Record<string, number | string>>(cursor: 
     throw new TypeError("Invalid cursor");
   }
 }
+
+/** Smallest string greater than every string with the given prefix (for range scans on an index). */
+export function prefixUpperBound(prefix: string): string {
+  const last = prefix.codePointAt(prefix.length - 1)!;
+  return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
+}

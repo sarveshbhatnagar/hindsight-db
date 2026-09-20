@@ -1,5 +1,5 @@
 import type { Connection } from "../storage/sqlite.js";
-import { asArray, decodeCursor, encodeCursor, inList } from "../storage/sqlite.js";
+import { asArray, decodeCursor, encodeCursor, inList, prefixUpperBound } from "../storage/sqlite.js";
 import { toMillis, windowAround } from "../time.js";
 import type {
   NamespaceStats,
@@ -13,7 +13,7 @@ import type {
   TimelineStreams,
 } from "../types.js";
 import { assertEntity, assertLimit } from "../validate.js";
-import { prefixUpperBound, type EventStore } from "./events.js";
+import type { EventProvider } from "../events/provider.js";
 
 interface TimelineRow {
   id: number;
@@ -60,10 +60,10 @@ export interface TimelineWindow {
 
 export class TimelineStore {
   private readonly conn: Connection;
-  private readonly events: EventStore;
+  private readonly events: EventProvider;
   private readonly prepared;
 
-  constructor(conn: Connection, events: EventStore) {
+  constructor(conn: Connection, events: EventProvider) {
     this.conn = conn;
     this.events = events;
     this.prepared = {
