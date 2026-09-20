@@ -1,3 +1,4 @@
+import type { EventProvider } from "./events/provider.js";
 import type { DurationInput, TimestampInput } from "./time.js";
 import type { Embedding } from "./vector.js";
 
@@ -294,9 +295,15 @@ export interface HistoryManyQuery extends Omit<HistoryQuery, "eventId"> {
   eventIds: string[];
 }
 
-export interface DatabaseOptions {
+export interface DatabaseOptions<E extends EventProvider = EventProvider> {
   /** Path to the SQLite file. Defaults to ":memory:". */
   path?: string;
+  /**
+   * External event source. When given, `db.events` is this provider and the
+   * SQLite file holds only the context (timeline, decisions, outcomes).
+   * Omit to store events in the file too (the default `SqliteEventStore`).
+   */
+  events?: E;
   /** Generate ids for records inserted without one. Defaults to time-ordered UUID v7. */
   idGenerator?: () => string;
   /** SQLite page cache in MiB (default: SQLite's ~2 MiB). Larger values speed up scans and paging at the cost of RAM. */

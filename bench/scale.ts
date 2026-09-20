@@ -404,7 +404,7 @@ async function main(): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Manual profile of the similar() hot loop, against a read-only connection.
-// Each variant reproduces one more stage of EventStore.similar() so the
+// Each variant reproduces one more stage of SqliteEventStore.similar() so the
 // difference between adjacent rows isolates that stage's cost.
 // ---------------------------------------------------------------------------
 

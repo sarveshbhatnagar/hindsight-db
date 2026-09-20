@@ -1,5 +1,6 @@
 import type { Connection } from "../storage/sqlite.js";
-import { asArray, chunks, decodeCursor, encodeCursor, inList } from "../storage/sqlite.js";
+import { asArray, chunks, decodeCursor, encodeCursor, inList, prefixUpperBound } from "../storage/sqlite.js";
+import type { EventProvider } from "./provider.js";
 import { toMillis } from "../time.js";
 import type {
   EntityStats,
@@ -135,13 +136,8 @@ function ranksBefore(a: { id: string; score: number }, b: { id: string; score: n
   return a.score > b.score || (a.score === b.score && a.id < b.id);
 }
 
-/** Smallest string greater than every string with the given prefix (for range scans on an index). */
-export function prefixUpperBound(prefix: string): string {
-  const last = prefix.codePointAt(prefix.length - 1)!;
-  return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
-}
-
-export class EventStore {
+/** The default event source: events stored in the same SQLite file as the context. */
+export class SqliteEventStore implements EventProvider {
   private readonly conn: Connection;
   private readonly prepared;
 
